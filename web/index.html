@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Angelopp — One number. Local control.</title>
+  <meta name="description" content="Angelopp is USSD-first local infrastructure that makes real availability and real offerings visible — fair, self-governed, and non-extractive." />
+
+  <style>
+    :root{
+      --bg:#0b0f14;
+      --card:#0f1620;
+      --text:#f4f7ff;
+      --muted:rgba(244,247,255,.72);
+      --line:rgba(244,247,255,.12);
+      --accent:#7cffb3;
+      --accent2:#ff2a2a;
+      --warn:#ffcc66;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background:
+        radial-gradient(1200px 700px at 20% 0%, rgba(124,255,179,.14), transparent 60%),
+        radial-gradient(900px 600px at 90% 20%, rgba(124,255,179,.10), transparent 55%),
+        var(--bg);
+      color:var(--text);
+    }
+    a{color:inherit}
+    .wrap{max-width:1040px;margin:0 auto;padding:22px 18px 70px}
+    .top{
+      display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;
+      padding:10px 0 18px;
+    }
+    .badge{
+      display:inline-flex;align-items:center;gap:8px;
+      padding:8px 12px;border:1px solid var(--line);border-radius:999px;
+      background:rgba(255,255,255,.03);
+      font-size:13px;color:var(--muted);
+    }
+    .dot{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 18px rgba(124,255,179,.7)}
+    h1{
+      margin:0;
+      font-weight:950;
+      letter-spacing:-0.03em;
+      line-height:1.02;
+      font-size: clamp(44px, 8.5vw, 78px);
+    }
+    .sub{
+      margin:14px 0 0;
+      color:var(--muted);
+      font-size: clamp(16px, 3.6vw, 20px);
+      line-height:1.6;
+      max-width: 62ch;
+    }
+    .hero{
+      margin-top:10px;
+      padding:18px;
+      border:1px solid var(--line);
+      border-radius:18px;
+      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+    }
+    @media (min-width: 740px){
+      .wrap{padding:28px 22px 82px}
+      .hero{padding:24px}
+    }
+    .dial{
+      margin-top:14px;
+      display:inline-flex;
+      align-items:center;
+      gap:10px;
+      padding:12px 14px;
+      border-radius:14px;
+      border:1px solid rgba(255,42,42,.28);
+      background:rgba(255,42,42,.08);
+    }
+    .dial strong{
+      font-size:30px;
+      letter-spacing:2px;
+      color:var(--accent2);
+      font-weight:950;
+    }
+    .dial span{
+      color:rgba(244,247,255,.86);
+      font-size:13px;
+    }
+
+    .pillrow{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+    .pill{
+      border:1px solid var(--line);
+      background:rgba(0,0,0,.12);
+      padding:10px 12px;border-radius:999px;
+      font-size:13px;color:var(--muted);
+    }
+
+    .cta{
+      margin-top:16px;
+      border-left:4px solid var(--accent);
+      padding:12px 14px;
+      background:rgba(124,255,179,.07);
+      border-radius:12px;
+      color:rgba(244,247,255,.88);
+      font-size:14px;
+      line-height:1.55;
+    }
+
+    .section{
+      margin-top:18px;
+      border:1px solid var(--line);
+      border-radius:16px;
+      background:rgba(255,255,255,.03);
+      padding:16px;
+    }
+
+    .grid{
+      display:grid;
+      grid-template-columns:1fr;
+      gap:14px;
+      margin-top:14px;
+    }
+    @media (min-width: 900px){
+      .grid{grid-template-columns:1fr 1fr}
+    }
+
+    .card{
+      border:1px solid var(--line);
+      border-radius:16px;
+      background:rgba(255,255,255,.03);
+      padding:16px;
+    }
+    h2{margin:0 0 10px;font-size:18px;letter-spacing:-0.01em}
+    p{margin:0;color:var(--muted);line-height:1.65;font-size:15.5px}
+    ul{margin:10px 0 0;padding:0 0 0 18px;color:var(--muted);line-height:1.7}
+    li{margin:7px 0}
+
+    .kpi{
+      display:grid;
+      grid-template-columns:1fr;
+      gap:10px;
+      margin-top:12px;
+    }
+    @media (min-width: 740px){
+      .kpi{grid-template-columns:repeat(3, 1fr)}
+    }
+    .kpi .box{
+      border:1px dashed rgba(244,247,255,.16);
+      border-radius:14px;
+      padding:12px 12px;
+      background:rgba(0,0,0,.10);
+    }
+    .kpi .box strong{display:block;color:rgba(244,247,255,.92)}
+    .kpi .box span{display:block;margin-top:6px;color:rgba(244,247,255,.68);font-size:13px;line-height:1.45}
+
+    .notice{
+      margin-top:12px;
+      border-left:4px solid var(--warn);
+      padding:12px 14px;
+      background:rgba(255,204,102,.08);
+      border-radius:12px;
+      color:rgba(244,247,255,.88);
+      font-size:14px;
+      line-height:1.55;
+    }
+
+    .footer{
+      margin-top:26px;
+      padding-top:18px;
+      border-top:1px solid var(--line);
+      color:rgba(244,247,255,.55);
+      font-size:13px;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      flex-wrap:wrap;
+    }
+    .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;}
+    .small{font-size:13px;color:rgba(244,247,255,.62)}
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="badge"><span class="dot"></span><strong>Angelopp</strong> <span class="mono">USSD Visibility Network</span></div>
+      <div class="badge">USSD-first • Local ownership • Non-extractive</div>
+    </div>
+
+    <div class="hero">
+      <h1>One number that has it all</h1>
+      <p class="sub">
+        Angelopp strengthens local communities by making existing social and economic activity
+        <strong>visible, fair, and self-governed</strong> — without taking ownership away from the people involved.
+        No guessing. No wasted calls. No algorithms that push people around.
+      </p>
+
+      <div class="dial">
+        <strong class="mono">*789*565656#</strong>
+        <span>Dial on any phone to see what’s available now.</span>
+      </div>
+
+      <div class="pillrow" aria-label="Stakeholders">
+        <div class="pill">Customers</div>
+        <div class="pill">Drivers (Boda / Tuktuk)</div>
+        <div class="pill">Businesses</div>
+        <div class="pill">SACCOs</div>
+        <div class="pill">Youth marketers (“Touts”)</div>
+        <div class="pill">Councils & partners</div>
+      </div>
+
+      <div class="cta">
+        <strong>Angelopp is infrastructure, not a platform.</strong>
+        It lays a simple USSD layer <em>over</em> existing roads, phone numbers, and community groups —
+        so real services become reachable in the moment they are needed, while people stay in control.
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>What we aim for</h2>
+      <p>
+        Most villages already function well: people know each other, trade, travel, and cooperate.
+        What is often missing is shared visibility — clear information about availability, expectations, reputation, and value.
+      </p>
+      <p style="margin-top:10px">
+        By making this visibility accessible (USSD-first), we reduce uncertainty, conflict, and wasted effort.
+        This builds trust, improves how income is distributed, and supports more respectful everyday interactions.
+      </p>
+
+      <div class="kpi" role="list" aria-label="Outcomes">
+        <div class="box" role="listitem">
+          <strong>Less uncertainty</strong>
+          <span>Fewer “try calling 5 numbers” moments.</span>
+        </div>
+        <div class="box" role="listitem">
+          <strong>Fairer demand</strong>
+          <span>More drivers and shops share opportunity.</span>
+        </div>
+        <div class="box" role="listitem">
+          <strong>Local autonomy</strong>
+          <span>Rules belong to the community, not an app.</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>How it works</h2>
+        <ul>
+          <li><strong>Drivers choose visibility.</strong> They show “free now” (voluntary availability).</li>
+          <li><strong>Customers choose from reality.</strong> A list of who is actually available now.</li>
+          <li><strong>Businesses & services become findable.</strong> Nearby offerings without smartphones.</li>
+          <li><strong>SACCOs act as trust anchors.</strong> Community oversight instead of remote algorithms.</li>
+        </ul>
+        <div class="notice">
+          <strong>Key difference:</strong> Angelopp surfaces reality. It does not try to predict or control people.
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Core principles</h2>
+        <ul>
+          <li><strong>Local ownership:</strong> communities operate and govern the system through cooperatives.</li>
+          <li><strong>Local data:</strong> data stays in the community and supports local decisions.</li>
+          <li><strong>Open code:</strong> transparent, inspectable, replaceable software.</li>
+          <li><strong>Fair choice:</strong> informed decisions instead of being pushed by algorithms.</li>
+          <li><strong>No extraction:</strong> no data selling, lock-in, or centralized value capture.</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Trust & safety</h2>
+        <p>
+          Trust is not a “feature”. It is the protocol.
+          Angelopp reduces risky situations by making interactions clearer before people meet.
+        </p>
+        <ul>
+          <li>Named places (villages & neighborhoods), not GPS tracking.</li>
+          <li>Community oversight through SACCO / local governance.</li>
+          <li>Fairness signals: consistent pricing and behavior become visible over time.</li>
+        </ul>
+        <p style="margin-top:10px" class="small">
+          (Optional pilot add-ons: masked numbers, callbacks, shared driver identifiers — depending on feasibility and local needs.)
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>Why it’s different from Uber/Bolt</h2>
+        <ul>
+          <li>Big apps predict & control. Angelopp <strong>surfaces reality</strong>.</li>
+          <li>Big apps own the rules. Angelopp keeps people in control.</li>
+          <li>Big apps centralize power. Angelopp strengthens existing local networks.</li>
+          <li>Big apps extract value. Angelopp is built for local autonomy.</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Transport-first (smart start)</h2>
+        <p>
+          Transport is the hardest test: speed, availability, trust.
+          If this works, everything else follows — shops, services, and coordination.
+        </p>
+        <ul>
+          <li>Customers get quick access to “who is free now”.</li>
+          <li>Drivers get fairer distribution of demand.</li>
+          <li>Communities get a shared reference point (“the one number”).</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Angelopp as a social protocol</h2>
+        <p>
+          The result is not just better matching between riders and customers.
+          It is a protocol that supports trust, self-organization, economic stability, and local autonomy.
+        </p>
+        <div class="cta" style="margin-top:12px">
+          <strong>In short:</strong> We do not try to change communities.
+          We help them see themselves more clearly — and stay in control.
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Pilot-ready</h2>
+      <p>
+        Angelopp is designed for step-by-step adoption: one village, then neighborhoods, then more categories.
+        USSD keeps access universal and friction low.
+      </p>
+      <div class="kpi">
+        <div class="box">
+          <strong>Start</strong>
+          <span>Transport availability + basic directory.</span>
+        </div>
+        <div class="box">
+          <strong>Expand</strong>
+          <span>Shops, food stalls, services (fundi, plumber, carpenter).</span>
+        </div>
+        <div class="box">
+          <strong>Govern</strong>
+          <span>Community rules, fairness, accountability, local ownership.</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div>© <span id="y"></span> Angelopp — simple, local, scalable.</div>
+      <div class="mono">USSD Visibility Network</div>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById("y").textContent = new Date().getFullYear();
+  </script>
+</body>
+</html>

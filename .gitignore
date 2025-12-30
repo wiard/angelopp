@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.venv/
+
+# data never in git
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# backups/logs
+backups/
+junk/
+ml/
+*.bak*
+*.backup*
+*.log
+*.tar.gz
