@@ -282,24 +282,6 @@
         <p style="margin-top:10px" class="small">
           (Optional pilot add-ons: masked numbers, callbacks, shared driver identifiers — depending on feasibility and local needs.)
         </p>
-
-
-      <div class="card">
-        <h2>Blockchain anchoring (Outixs)</h2>
-        <p>
-          Angelopp uses a minimal “blockchain-style” event stream (Outixs) to store proof of real-world actions
-          without turning the community into a tracked platform.
-        </p>
-        <ul>
-          <li><strong>What gets anchored:</strong> when a ride/job is completed, Angelopp emits <span class="mono">RIDE_COMPLETED</span>.</li>
-          <li><strong>Minimal data:</strong> <span class="mono">internal_id</span> (<span class="mono">angelopp_req_&lt;request_id&gt;</span>) + <span class="mono">rider_phone</span>.</li>
-          <li><strong>Why:</strong> a verifiable history for fairness, governance, and dispute resolution (later: ratings, disputes, payments).</li>
-          <li><strong>Resilient:</strong> if Outixs is down, Angelopp keeps running — anchoring never breaks USSD.</li>
-        </ul>
-        <div class="notice">
-          <strong>Important:</strong> this is not surveillance. It’s a lightweight, immutable memory of agreed events — owned and governed locally.
-        </div>
-      </div>
       </div>
 
       <div class="card">
@@ -360,6 +342,23 @@
       </div>
     </div>
 
+
+    <div class="section">
+      <h2>Blockchain anchoring (Outixs)</h2>
+      <p>
+        Angelopp can anchor real-world actions (like a completed ride) into a minimal, verifiable event stream.
+        This is not about controlling payments — it is about making agreements and outcomes auditable over time.
+      </p>
+      <ul>
+        <li><strong>When a job is completed</strong>, Angelopp emits a <span class="mono">RIDE_COMPLETED</span> transition to Outixs.</li>
+        <li>Each anchor carries a stable <span class="mono">internal_id</span> like <span class="mono">angelopp_req_&lt;request_id&gt;</span>.</li>
+        <li>The anchor also stores <span class="mono">rider_phone</span>, so trust/fairness can be measured per rider without GPS tracking.</li>
+      </ul>
+      <div class="notice">
+        <strong>Why this matters:</strong> it builds local trust histories and supports governance/fairness — while keeping ownership with the community.
+      </div>
+    </div>
+
     <div class="footer">
       <div>© <span id="y"></span> Angelopp — simple, local, scalable.</div>
       <div class="mono">USSD Visibility Network</div>
@@ -369,21 +368,5 @@
   <script>
     document.getElementById("y").textContent = new Date().getFullYear();
   </script>
-    <div class="section">
-      <h2>Blockchain anchoring (Outixs)</h2>
-      <p>
-        Angelopp does not use the blockchain to control people or payments.
-        Instead, it anchors <strong>real-world events</strong> as immutable proofs.
-      </p>
-      <ul>
-        <li>When a ride is completed, a <code>RIDE_COMPLETED</code> event is anchored.</li>
-        <li>The anchor includes a stable internal ID and the rider phone number.</li>
-        <li>This creates a verifiable public memory without exposing personal data.</li>
-      </ul>
-      <p class="small">
-        Outixs acts as a minimal, append-only ledger for trust, fairness and local governance.
-        No smart contracts. No speculation. Just facts.
-      </p>
-    </div>
 </body>
 </html>
