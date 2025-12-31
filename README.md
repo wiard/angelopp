@@ -1,21 +1,27 @@
 # Angelopp (USSD) + Outixs Anchoring
 
-This repository contains the Angelopp USSD backend used in the Bumala pilot, with a minimal integration to anchor completed rides into an Outixs node.
+Angelopp is a USSD-first local infrastructure system designed for rural and low-connectivity environments.
+
+It makes real economic activity visible via a SINGLE USSD number, and anchors key events into an immutable outixs ledger.
 
 ## What works now
 
-- USSD flows for customers and service providers
-- Providers can complete a job (complete_job)
-- On job completion, a RIDE_COMPLETED event is anchored into Outixs
-- Angelopp never fails if Outixs is down (fail-safe)
+- USSD flows for customers and providers
+- Providers can complete a job (`complete_job`)
+- On completion, a `RIDE_COMPLETED` event is anchored into Outixs
+- Each anchor includes:
+  - `stable internal_id` (`angelopp_req_<REQID>`)
+  - `rider_phone` (provider phone number)
 
 ## Example Outixs row
 
-- transition_type: RIDE_COMPLETED
-- internal_id: angelopp_req_3
-- rider_phone: +254700000001
+- `transition_type` : `RIDE_COMPLETED`
+- `internal_id` : `angelopp_req_3`
+- `rider_phone` : `+254700000001`
 
 ## Configuration
+
+Set the Outixs endpoint used for anchoring:
 
 ```bash
 export OUTIXS_URL="http://127.0.0.1:8080"
@@ -23,8 +29,10 @@ export OUTIXS_URL="http://127.0.0.1:8080"
 
 ## Vision
 
-Angelopp makes local economic activity visible via USSD, and anchors it into a verifiable event stream with Outixs.
+Angelopp is built for communities where trust is social before it is digital.
 
-The goal is not to control, but to make agreements and real-world actions transparent and fair.
+- Technology supports real-world agreements
+- USSD is a strength, not a limitation
+- Blockchain is memory, not control
 
-Outixs acts as a minimal, immutable memory layer for local governance and trust.
+Together, Angelopp and Outixs create a verifiable, non-extractive digital infrastructure for local governance, fairness, and growth.
