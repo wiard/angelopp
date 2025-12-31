@@ -1,6 +1,6 @@
 from flask import Flask, request
 import landmark_game
-from ussd import handle_ussd
+from angelopp import handle_ussd
 
 print('[USSD] running file:', __file__, flush=True)
 app = Flask(__name__)
