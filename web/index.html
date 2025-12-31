@@ -282,6 +282,24 @@
         <p style="margin-top:10px" class="small">
           (Optional pilot add-ons: masked numbers, callbacks, shared driver identifiers — depending on feasibility and local needs.)
         </p>
+
+
+      <div class="card">
+        <h2>Blockchain anchoring (Outixs)</h2>
+        <p>
+          Angelopp uses a minimal “blockchain-style” event stream (Outixs) to store proof of real-world actions
+          without turning the community into a tracked platform.
+        </p>
+        <ul>
+          <li><strong>What gets anchored:</strong> when a ride/job is completed, Angelopp emits <span class="mono">RIDE_COMPLETED</span>.</li>
+          <li><strong>Minimal data:</strong> <span class="mono">internal_id</span> (<span class="mono">angelopp_req_&lt;request_id&gt;</span>) + <span class="mono">rider_phone</span>.</li>
+          <li><strong>Why:</strong> a verifiable history for fairness, governance, and dispute resolution (later: ratings, disputes, payments).</li>
+          <li><strong>Resilient:</strong> if Outixs is down, Angelopp keeps running — anchoring never breaks USSD.</li>
+        </ul>
+        <div class="notice">
+          <strong>Important:</strong> this is not surveillance. It’s a lightweight, immutable memory of agreed events — owned and governed locally.
+        </div>
+      </div>
       </div>
 
       <div class="card">
