@@ -89,9 +89,10 @@ def pick_from_list(title: str, items: List[Tuple[str, str]]) -> str:
 # -------------------------
 OUTIXS_URL = os.environ.get("OUTIXS_URL", "http://127.0.0.1:8080")
 
-def outixs_ride_completed(internal_id: str, rider_phone: str | None = None) -> None:
+def outixs_ride_completed(internal_id: str, rider_phone: str | None = None) -> bool:
     """
     Minimal anchor: only store that a job was completed.
+    Return True only if Outixs acknowledges (200/201).
     Angelopp must never fail if Outixs is down.
     """
     try:
@@ -109,10 +110,40 @@ def outixs_ride_completed(internal_id: str, rider_phone: str | None = None) -> N
                 "channel": "ussd"
             }
         }
-        requests.post(f"{OUTIXS_URL}/transition", json=payload, timeout=2)
+        r = requests.post(f"{OUTIXS_URL}/transition", json=payload, timeout=5)
+        return int(getattr(r, "status_code", 0)) in (200, 201)
     except Exception as e:
         # keep Angelopp running no matter what
         print("Outixs event failed:", e)
+        return False
+
+
+def get_last_outixs_anchor_status(internal_id: str):
+    """Return (anchored_ok: bool|None, anchored_at: str|None) from local bumala.db outixs_anchors."""
+    try:
+        conn = db()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT anchored_ok, anchored_at FROM outixs_anchors WHERE internal_id=? ORDER BY id DESC LIMIT 1",
+                (str(internal_id),)
+            )
+            row = cur.fetchone()
+        except Exception:
+            cur.execute(
+                "SELECT 1 AS anchored_ok, created_at AS anchored_at FROM outixs_anchors WHERE internal_id=? ORDER BY id DESC LIMIT 1",
+                (str(internal_id),)
+            )
+            row = cur.fetchone()
+        conn.close()
+        if not row:
+            return (None, None)
+        anchored_ok = None if row[0] is None else bool(int(row[0]))
+        anchored_at = row[1] if len(row) > 1 else None
+        return (anchored_ok, anchored_at)
+    except Exception:
+        return (None, None)
+
 
 # -------------------------
 # Seed menus
@@ -645,12 +676,13 @@ def provider_active_jobs(phone: str, limit: int = 8) -> List[sqlite3.Row]:
 def complete_job(provider_phone: str, request_id: int) -> bool:
     """
     Mark job as CLOSED (completed) ONLY if it belongs to this provider and is ACCEPTED.
-    Then anchor to Outixs.
+    Then anchor to Outixs and log locally so menus can show anchor status.
     """
     provider_phone = normalize_phone(provider_phone)
+
+    # 1) Validate assignment + ACCEPTED
     conn = db()
     cur = conn.cursor()
-
     cur.execute("""
     SELECT 1
     FROM assignments a
@@ -661,13 +693,322 @@ def complete_job(provider_phone: str, request_id: int) -> bool:
         conn.close()
         return False
 
+    # 2) Close request
     cur.execute("UPDATE service_requests SET status='CLOSED' WHERE id=?", (int(request_id),))
     conn.commit()
     conn.close()
 
-    # Anchor completion (only after DB commit)
-    outixs_ride_completed(f"angelopp_req_{int(request_id)}", provider_phone)
+    # 3) Anchor
+    internal_id = f"angelopp_req_{int(request_id)}"
+    try:
+        anchored_ok = bool(outixs_ride_completed(internal_id, provider_phone))
+    except Exception as e:
+        print("Outixs anchor failed:", e)
+        anchored_ok = False
+
+    # 4) Local log (bumala.db) - clean schema with anchored_ok
+    try:
+        import sqlite3
+        conn2 = sqlite3.connect(DB_PATH)
+        cur2 = conn2.cursor()
+
+        # migrate legacy outixs_anchors if it has NOT NULL hash/height schema
+        cur2.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='outixs_anchors'")
+        if cur2.fetchone():
+            cur2.execute("PRAGMA table_info(outixs_anchors)")
+            cols = [r[1] for r in cur2.fetchall()]
+            if ("outixs_block_hash" in cols and "outixs_height" in cols and "anchored_ok" not in cols):
+                legacy = f"outixs_anchors_legacy_{int(time.time())}"
+                cur2.execute(f"ALTER TABLE outixs_anchors RENAME TO {legacy}")
+
+        cur2.execute("""
+        CREATE TABLE IF NOT EXISTS outixs_anchors (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          request_id INTEGER,
+          internal_id TEXT NOT NULL UNIQUE,
+          rider_phone TEXT,
+          transition_type TEXT,
+          anchored_ok INTEGER NOT NULL DEFAULT 0,
+          anchored_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """)
+
+        cur2.execute(
+            "INSERT INTO outixs_anchors (request_id, internal_id, rider_phone, transition_type, anchored_ok, anchored_at) "
+            "VALUES (?,?,?,?,?, datetime('now')) "
+            "ON CONFLICT(internal_id) DO UPDATE SET "
+            "request_id=excluded.request_id, rider_phone=excluded.rider_phone, transition_type=excluded.transition_type, "
+            "anchored_ok=excluded.anchored_ok, anchored_at=datetime('now')",
+            (int(request_id), internal_id, provider_phone, "RIDE_COMPLETED", 1 if anchored_ok else 0)
+        )
+
+        conn2.commit()
+        conn2.close()
+    except Exception as e:
+        print("Outixs anchor log failed:", e)
+
     return True
+
+
+
+
+
+
+def list_counties():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT code, name FROM counties ORDER BY name ASC")
+    rows = cur.fetchall()
+    conn.close()
+    # USSD list expects (key,label)
+    return [(r["code"], r["name"]) for r in rows]
+
+def list_towns(county_code: str):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM towns WHERE county_code=? ORDER BY name ASC LIMIT 30", (county_code,))
+    rows = cur.fetchall()
+    conn.close()
+    # town choice key is numeric index to keep USSD short
+    return [r["name"] for r in rows]
+
+def list_airports():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT code, name FROM airports ORDER BY name ASC")
+    rows = cur.fetchall()
+    conn.close()
+    return [(r["code"], r["name"]) for r in rows]
+
+def get_km_to_airport(county_code: str, town_name: str, airport_code: str):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT km FROM airport_dist_km WHERE county_code=? AND town_name=? AND airport_code=?",
+        (county_code, town_name, airport_code),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return int(row["km"]) if row and row["km"] is not None else None
+
+# -------------------------
+# Traveler & Airport (back & forth)
+# -------------------------
+NAIROBI_REGIONS = [
+    ("1", "Nairobi CBD"),
+    ("2", "Westlands"),
+    ("3", "Eastlands"),
+]
+# Price multipliers per region (affects final fare)
+NAIROBI_REGION_MULT = {"1": 1.00, "2": 1.15, "3": 1.30}
+
+# Minimal province/town seed (v1) — extend anytime
+PROVINCES = [
+    ("1", "Nairobi"),
+    ("2", "Kiambu"),
+    ("3", "Machakos"),
+    ("4", "Kajiado"),
+]
+TOWNS_BY_PROVINCE = {
+    "1": [("1", "CBD"), ("2", "Westlands"), ("3", "Eastlands")],
+    "2": [("1", "Thika"), ("2", "Ruiru"), ("3", "Kiambu Town")],
+    "3": [("1", "Athi River"), ("2", "Machakos Town")],
+    "4": [("1", "Kitengela"), ("2", "Kajiado Town")],
+}
+
+AIRPORTS = [
+    ("1", "JKIA"),
+    ("2", "Wilson"),
+]
+
+# VERY simple distance table in km (v1 placeholder)
+# (province_key, town_key, airport_key) -> km
+DIST_KM = {
+    ("1","1","1"): 18,  ("1","1","2"): 6,
+    ("1","2","1"): 20,  ("1","2","2"): 8,
+    ("1","3","1"): 15,  ("1","3","2"): 10,
+    ("2","1","1"): 45,  ("2","2","1"): 28, ("2","3","1"): 32,
+    ("3","1","1"): 12,  ("3","2","1"): 55,
+    ("4","1","1"): 24,  ("4","2","1"): 80,
+}
+
+def ensure_traveler_schema() -> None:
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS traveler_prefs (
+      phone TEXT PRIMARY KEY,
+      nairobi_region TEXT DEFAULT '1',
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+def get_traveler_region(phone: str) -> str:
+    ensure_traveler_schema()
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT nairobi_region FROM traveler_prefs WHERE phone=?", (phone,))
+    row = cur.fetchone()
+    conn.close()
+    return (row["nairobi_region"] if row and row["nairobi_region"] else "1")
+
+def set_traveler_region(phone: str, region_key: str) -> None:
+    ensure_traveler_schema()
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+    INSERT OR REPLACE INTO traveler_prefs (phone, nairobi_region, updated_at)
+    VALUES (?, ?, datetime('now'))
+    """, (phone, region_key))
+    conn.commit()
+    conn.close()
+
+def estimate_airport_fare_kes(km: int, region_key: str) -> int:
+    # Base model (v1): min fare + per-km * region multiplier
+    per_km = 120  # KES/km (tune)
+    min_fare = 1500
+    mult = float(NAIROBI_REGION_MULT.get(region_key, 1.0))
+    fare = int(max(min_fare, km * per_km) * mult)
+    return fare
+
+def traveler_menu(phone: str) -> str:
+    region = get_traveler_region(phone)
+    region_name = dict(NAIROBI_REGIONS).get(region, "Nairobi CBD")
+    return "\n".join([
+        "CON Traveler & Airport",
+        f"Region: {region_name}",
+        "1. Book airport ride",
+        "2. Set Nairobi region (price)",
+        "9. Switch role",
+        "0. Exit"
+    ])
+
+def handle_traveler(parts: List[str], phone: str) -> Tuple[str, int]:
+    phone = normalize_phone(phone)
+
+    # Root of traveler role
+    if len(parts) == 1:
+        return ussd_response(traveler_menu(phone)), 200
+
+    c1 = parts[1].strip()
+
+    # Exit / switch
+    if c1 == "0":
+        return "END Bye.", 200
+    if c1 == "9":
+        set_role(phone, None)
+        return ussd_response(root_menu(phone)), 200
+
+    # 2) Set Nairobi region
+    if c1 == "2":
+        if len(parts) == 2:
+            return ussd_response(pick_from_list("Choose Nairobi region:", NAIROBI_REGIONS)), 200
+        if parts[2].strip() == "0":
+            return ussd_response(traveler_menu(phone)), 200
+        rk = parts[2].strip()
+        if rk not in dict(NAIROBI_REGIONS):
+            return ussd_response("CON Invalid.\n0. Back"), 200
+        set_traveler_region(phone, rk)
+        return ("END Saved ✓", 200)
+
+    # 1) Book airport ride wizard
+    if c1 == "1":
+        # Step 1: direction
+        if len(parts) == 2:
+            return ussd_response("\n".join([
+                "CON Direction",
+                "1. To airport",
+                "2. From airport",
+                "0. Back"
+            ])), 200
+        if parts[2].strip() == "0":
+            return ussd_response(traveler_menu(phone)), 200
+        direction = parts[2].strip()
+        if direction not in ("1", "2"):
+            return ussd_response("CON Invalid.\n0. Back"), 200
+
+        # Step 2: choose province
+        if len(parts) == 3:
+            return ussd_response(pick_from_list("Choose county:", list_counties())), 200
+        if parts[3].strip() == "0":
+            return ussd_response(traveler_menu(phone)), 200
+        prov = parts[3].strip()
+        # prov is county_code
+        if not prov or len(prov) != 2:
+            return ussd_response("CON Invalid.\n0. Back"), 200
+
+        # Step 3: choose town/village within province
+        towns = list_towns(prov)
+        if len(parts) == 4:
+            return ussd_response(pick_from_list("Choose town/village:", [(str(i+1), name) for i, name in enumerate(towns)])), 200
+        if parts[4].strip() == "0":
+            return ussd_response(traveler_menu(phone)), 200
+        town_choice = parts[4].strip()
+        try:
+            t_idx = int(town_choice)
+        except Exception:
+            t_idx = -1
+        if t_idx < 1 or t_idx > len(towns):
+            return ussd_response("CON Invalid.\n0. Back"), 200
+
+        # Step 4: choose airport
+        if len(parts) == 5:
+            return ussd_response(pick_from_list("Choose airport:", list_airports())), 200
+        if parts[5].strip() == "0":
+            return ussd_response(traveler_menu(phone)), 200
+        airport = parts[5].strip()
+        if airport not in dict(list_airports()):
+            return ussd_response("CON Invalid.\n0. Back"), 200
+
+        # Step 5: quote + confirm
+        region_key = get_traveler_region(phone)
+        km = get_km_to_airport(prov, town_txt, airport)
+        km = int(km) if km is not None else 50  # fallback km
+        fare = estimate_airport_fare_kes(km, region_key)
+
+        dir_txt = "To airport" if direction == "1" else "From airport"
+        prov_txt = dict(list_counties())[prov]
+        town_txt = towns[t_idx-1]
+        airport_txt = dict(list_airports())[airport]
+        region_txt = dict(NAIROBI_REGIONS).get(region_key, "Nairobi CBD")
+
+        if len(parts) == 6:
+            return ussd_response("\n".join([
+                "CON Quote",
+                f"{dir_txt} • {airport_txt}",
+                f"{prov_txt} / {town_txt}",
+                f"Region: {region_txt}",
+                f"Distance: ~{km} km",
+                f"Price: {fare} KES",
+                "1. Confirm booking",
+                "0. Back"
+            ])), 200
+
+        if parts[6].strip() == "0":
+            return ussd_response(traveler_menu(phone)), 200
+
+        if parts[6].strip() == "1":
+            # create a service_request using a dedicated service_id name (ensure inserted in DB outside)
+            note = f"AIRPORT_TRAVEL | {dir_txt} {airport_txt} | {prov_txt}/{town_txt} | county={prov} | region={region_txt} | km={km} | price_kes={fare}"
+            conn = db()
+            cur = conn.cursor()
+            # find service_id by name
+            cur.execute("SELECT id FROM services WHERE name='Traveler & Airport (back & forth)' LIMIT 1;")
+            row = cur.fetchone()
+            service_id = int(row["id"]) if row else 1
+            cur.execute("""
+            INSERT INTO service_requests (customer_phone, service_id, village, landmark, note, status)
+            VALUES (?,?,?,?,?, 'OPEN')
+            """, (phone, service_id, prov_txt, town_txt, note))
+            conn.commit()
+            conn.close()
+            return ("END Booking created ✓\nDrivers will appear when available.", 200)
+
+        return ussd_response("CON Invalid.\n0. Back"), 200
+
+    return ussd_response("CON Invalid.\n0. Back"), 200
 
 # =========================
 # UI Menus
@@ -676,12 +1017,42 @@ def root_menu(phone: str) -> str:
     role = get_role(phone)
     if role == "customer":
         return customer_menu()
+
+        # Customer -> Travel & Airport submenu
+        if parts and parts[0] == "4":
+            # 4            -> submenu
+            if len(parts) == 1:
+                return ussd_response(customer_travel_menu(phone)), 200
+            # 4*0          -> back
+            if len(parts) >= 2 and parts[1] == "0":
+                return ussd_response(customer_menu()), 200
+            # 4*2          -> Airport back&forth (re-use bestaande traveler/airport handler als die bestaat)
+            if len(parts) >= 2 and parts[1] == "2":
+                # Forward naar jouw bestaande traveler/airport flow:
+                # handle_traveler verwacht vaak T*...; wij mappen customer 4*2 -> T*1 (airport)
+                if "handle_traveler" in globals():
+                    return handle_traveler(["T","1"] + parts[2:], phone)
+                return ("END Airport module not wired yet.", 200)
+            # 4*3          -> Long trip route planner (later)
+            if len(parts) >= 2 and parts[1] == "3":
+                if "handle_traveler" in globals():
+                    # voorbeeld: T*2 = routeplanner (pas aan als jij andere mapping hebt)
+                    return handle_traveler(["T","2"] + parts[2:], phone)
+                return ("END Route planner not wired yet.", 200)
+            # 4*1          -> Local rides (nu: terug naar je bestaande Find service of later eigen flow)
+            if len(parts) >= 2 and parts[1] == "1":
+                # Re-use bestaande 'Find a service' (1)
+                return ussd_response(customer_menu()), 200
+            return ussd_response(customer_travel_menu(phone) + "\n\nInvalid."), 200
     if role == "provider":
         return provider_menu()
+    if role == "traveler":
+        return traveler_menu(phone)
     return "\n".join([
         "CON Angelopp Bumala",
         "1. I am a Customer",
         "2. I am a Service Provider",
+        "3. Traveler & Airport (back & forth)",
         "0. Exit"
     ])
 
@@ -691,8 +1062,20 @@ def customer_menu() -> str:
         f"1. Find a service {ICON_GO}",
         "2. My requests",
         "3. Set my landmark",
+        "4. Travel & Airport",
         "9. Switch role",
         "0. Exit"
+    ])
+
+
+def customer_travel_menu(phone: str) -> str:
+    # Je kunt hier later 'home village/city' tonen via bestaande landmark/village velden.
+    return "\n".join([
+        "CON Travel & Airport",
+        "1. Local rides (my village/city)",
+        "2. Airport ride (back & forth)",
+        "3. Long trip (route planner)",
+        "0. Back"
     ])
 
 def provider_menu() -> str:
@@ -1242,8 +1625,17 @@ def handle_provider_complete(parts: List[str], phone: str) -> Tuple[str, int]:
 
     if parts[3].strip() == "1":
         ok = complete_job(phone, request_id)
+        internal_id = "angelopp_req_" + str(int(request_id))
+        anchored_ok, anchored_at = get_last_outixs_anchor_status(internal_id)
         if ok:
-            return ("END Completed ✓\nSaved to Outixs.", 200)
+            if anchored_ok is True:
+                outixs_line = "Outixs: ANCHORED ✅ (" + internal_id + ")"
+            elif anchored_ok is False:
+                outixs_line = "Outixs: NOT ANCHORED ⚠️ (" + internal_id + ")"
+            else:
+                outixs_line = "Outixs: UNKNOWN… (" + internal_id + ")"
+            return ("END Completed ✓\n" + outixs_line, 200)
+        return ("END Not completed.\n(Check assignment/status)", 200)
         return ("END Not possible.\n(Already closed or not yours)", 200)
 
     return ussd_response("CON Invalid.\n0. Back"), 200
@@ -1276,6 +1668,10 @@ def handle_ussd(session_id: str, phone_number: str, text: str) -> Tuple[str, int
         if c == "2":
             set_role(phone, "provider")
             return ussd_response(provider_menu()), 200
+        if c == "3":
+            set_role(phone, "traveler")
+            ensure_traveler_schema()
+            return ussd_response(traveler_menu(phone)), 200
         if c == "0":
             return "END Bye.", 200
         return ussd_response(root_menu(phone)), 200
