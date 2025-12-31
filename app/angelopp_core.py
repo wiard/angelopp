@@ -1010,12 +1010,136 @@ def handle_traveler(parts: List[str], phone: str) -> Tuple[str, int]:
 
     return ussd_response("CON Invalid.\n0. Back"), 200
 
+
+
 # =========================
-# UI Menus
+# Travel & Airport (Customer)
 # =========================
+NAIROBI_REGIONS = [
+    ("1", "Nairobi CBD"),
+    ("2", "Westlands"),
+    ("3", "Eastlands"),
+]
+
+def get_traveler_prefs(phone: str):
+    phone = normalize_phone(phone)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS traveler_prefs (
+      phone TEXT PRIMARY KEY,
+      nairobi_region TEXT NOT NULL DEFAULT 'Nairobi CBD',
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    """)
+    cur.execute("SELECT nairobi_region FROM traveler_prefs WHERE phone=?", (phone,))
+    row = cur.fetchone()
+    if not row:
+        cur.execute("INSERT OR REPLACE INTO traveler_prefs (phone, nairobi_region, updated_at) VALUES (?,?,datetime('now'))",
+                    (phone, "Nairobi CBD"))
+        conn.commit()
+        region = "Nairobi CBD"
+    else:
+        region = row[0] or "Nairobi CBD"
+    conn.close()
+    return {"nairobi_region": region}
+
+def set_traveler_region(phone: str, region: str) -> None:
+    phone = normalize_phone(phone)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS traveler_prefs (
+      phone TEXT PRIMARY KEY,
+      nairobi_region TEXT NOT NULL DEFAULT 'Nairobi CBD',
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    """)
+    cur.execute("INSERT OR REPLACE INTO traveler_prefs (phone, nairobi_region, updated_at) VALUES (?,?,datetime('now'))",
+                (phone, region))
+    conn.commit()
+    conn.close()
+
+def handle_customer_travel(parts: list, phone: str):
+    """
+    Customer -> Travel & Airport (nested under Customer menu option 4)
+
+    Works with both:
+      - raw parts: ["4", ...]
+      - prefixed parts: ["C","4",...]
+    """
+    phone = normalize_phone(phone)
+    ensure_traveler_schema()
+
+    # Support "C" prefix
+    offset = 1 if parts and parts[0] == "C" else 0
+
+    # Expect menu choice "4" at parts[offset]
+    if len(parts) <= offset or parts[offset].strip() != "4":
+        return ussd_response("CON Invalid.\n0. Back"), 200
+
+    # Helper: show main travel menu (customer-scoped)
+    def show_travel_menu():
+        region = get_traveler_region(phone) or "Nairobi CBD"
+        return ussd_response("\n".join([
+            "CON Travel & Airport",
+            f"Region: {region}",
+            "1. Book airport ride",
+            "2. Set Nairobi region (price)",
+            "0. Back"
+        ])), 200
+
+    # 4 -> show travel menu
+    if len(parts) == offset + 1:
+        return show_travel_menu()
+
+    sub = parts[offset + 1].strip()
+
+    # 4*0 -> back to customer menu
+    if sub == "0":
+        return ussd_response(customer_menu()), 200
+
+    # 4*1 -> Book airport ride (stub for now)
+    if sub == "1":
+        region = get_traveler_region(phone) or "Nairobi CBD"
+        return ("END Airport rides (stub)\n"
+                f"Pricing region: {region}\n"
+                "Next: choose Pickup/Dropoff, then show price.\n", 200)
+
+    # 4*2 -> Set Nairobi region
+    if sub == "2":
+        # 4*2 -> show region list
+        if len(parts) == offset + 2:
+            return ussd_response("\n".join([
+                "CON Nairobi region (sets price band)",
+                "1. Nairobi CBD",
+                "2. Westlands",
+                "3. Eastlands",
+                "0. Back"
+            ])), 200
+
+        pick = parts[offset + 2].strip()
+        if pick == "0":
+            return show_travel_menu()
+
+        mapping = {"1": "Nairobi CBD", "2": "Westlands", "3": "Eastlands"}
+        if pick not in mapping:
+            return ussd_response("CON Invalid.\n0. Back"), 200
+
+        set_traveler_region(phone, mapping[pick])
+        return ("END Saved ✓\nRegion: " + mapping[pick], 200)
+
+    return ussd_response("CON Invalid.\n0. Back"), 200
 def root_menu(phone: str) -> str:
     role = get_role(phone)
     if role == "customer":
+        # [TRAVEL-FIRST-ROUTER]
+        # Travel & Airport must be routed before normal menu choice parsing
+        if parts and parts[0].strip() == '4':
+            return handle_customer_travel(parts, phone)
+        if parts and parts[0].strip() in ('C','c') and len(parts) > 1 and parts[1].strip() == '4':
+            return handle_customer_travel(parts, phone)
+
         return customer_menu()
 
         # Customer -> Travel & Airport submenu
@@ -1052,7 +1176,6 @@ def root_menu(phone: str) -> str:
         "CON Angelopp Bumala",
         "1. I am a Customer",
         "2. I am a Service Provider",
-        "3. Traveler & Airport (back & forth)",
         "0. Exit"
     ])
 
@@ -1110,6 +1233,11 @@ def handle_customer(parts: List[str], session_id: str, phone: str) -> Tuple[str,
         return ussd_response(customer_menu()), 200
 
     choice = parts[1].strip()
+
+    # Customer Travel & Airport router (menu option 4)
+    if parts[1].strip() == "4":
+        # Forward full parts including leading 'C'
+        return handle_customer_travel(parts, phone)
 
     if choice == "0":
         return "END Bye.", 200
@@ -1668,10 +1796,6 @@ def handle_ussd(session_id: str, phone_number: str, text: str) -> Tuple[str, int
         if c == "2":
             set_role(phone, "provider")
             return ussd_response(provider_menu()), 200
-        if c == "3":
-            set_role(phone, "traveler")
-            ensure_traveler_schema()
-            return ussd_response(traveler_menu(phone)), 200
         if c == "0":
             return "END Bye.", 200
         return ussd_response(root_menu(phone)), 200
