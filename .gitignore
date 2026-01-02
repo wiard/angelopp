@@ -34,3 +34,12 @@ app/*.db*
 # -------------------------------------------------
 .DS_Store
 Thumbs.db
+
+# local backups / scratch
+*.bak.*
+*.old_*
+*.bad_*
+*.off_*
+*.db
+*.sqlite
+*.sqlite3

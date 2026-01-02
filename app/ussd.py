@@ -2,6 +2,10 @@ from __future__ import annotations
 # --- Relative distance engine ---
 from relative_distance import PersonLocation, rank_drivers
 
+# Toggle demo inputs for fairness ranking
+FAIRNESS_DEMO_MODE = True
+
+
 # /opt/bumala_riders/bumala_riders_ussd.py
 
 
@@ -10,6 +14,107 @@ from relative_distance import PersonLocation, rank_drivers
 MAX_LIST = 10
 
 # === LANDMARK HELPERS ===
+
+# ============================================================
+# FAIRNESS_INTEGRATION_V1 (safe, optional)
+# ============================================================
+try:
+    from policies.fairness import Candidate, PolicyWeights, rank_candidates
+except Exception:
+    Candidate = None
+    PolicyWeights = None
+    rank_candidates = None
+
+try:
+    from adapters.payments_adapter import DummyPaymentsAdapter
+    from adapters.sms_adapter import DummySmsAdapter
+    from adapters.voice_adapter import DummyVoiceAdapter
+except Exception:
+    DummyPaymentsAdapter = None
+    DummySmsAdapter = None
+    DummyVoiceAdapter = None
+
+PAYMENTS = DummyPaymentsAdapter() if DummyPaymentsAdapter else None
+SMS = DummySmsAdapter() if DummySmsAdapter else None
+VOICE = DummyVoiceAdapter() if DummyVoiceAdapter else None
+
+
+def _to_float(x, default=None):
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+
+def _rank_riders_if_possible(riders):
+    # riders can be list[dict] or list[tuple]; returns same shape, sorted
+    if not riders or not rank_candidates or not Candidate:
+        return riders
+
+    cands = []
+    original = []
+
+    for r in riders:
+        phone = None
+        eta = None
+        trust = 0.5
+        recent = 0
+        income = 0.0
+
+        if isinstance(r, dict):
+            phone = r.get("phone") or r.get("msisdn") or r.get("id")
+            eta = _to_float(r.get("eta_minutes") or r.get("eta"))
+            trust = float(r.get("trust_score", trust))
+            recent = int(r.get("recent_jobs", recent))
+            income = float(r.get("expected_income", income))
+        elif isinstance(r, (tuple, list)) and len(r) >= 1:
+            phone = str(r[0])
+            if len(r) >= 2:
+                eta = _to_float(r[1])
+        else:
+            continue
+
+        if not phone:
+            continue
+
+        cands.append(Candidate(phone=str(phone), eta_minutes=eta, trust_score=trust, recent_jobs=recent, expected_income=income))
+        original.append(r)
+
+    ranked = rank_candidates(cands, PolicyWeights())
+
+    # map by phone back to original entries
+    by_phone = {}
+    for r in riders:
+        if isinstance(r, dict):
+            k = r.get("phone") or r.get("msisdn") or r.get("id")
+            if k: by_phone[str(k)] = r
+        elif isinstance(r, (tuple, list)) and r:
+            by_phone[str(r[0])] = r
+
+    out = []
+    for c in ranked:
+        if c.phone in by_phone:
+            out.append(by_phone[c.phone])
+
+    # preserve leftovers
+    seen = set()
+    for o in out:
+        if isinstance(o, dict):
+            seen.add(str(o.get("phone") or o.get("msisdn") or o.get("id")))
+        elif isinstance(o, (tuple, list)) and o:
+            seen.add(str(o[0]))
+
+    for r in riders:
+        key = None
+        if isinstance(r, dict):
+            key = r.get("phone") or r.get("msisdn") or r.get("id")
+        elif isinstance(r, (tuple, list)) and r:
+            key = r[0]
+        if key is None or str(key) not in seen:
+            out.append(r)
+
+    return out
+
 def save_landmark(phone: str, name: str, description: str):
     import sqlite3
     db = sqlite3.connect(DB_PATH)
@@ -1174,15 +1279,91 @@ def handle_challenge(parts: list[str], session_id: str, phone: str):
 
 def nearest_drivers_screen(phone: str, village: str, landmark: str, limit: int = 3) -> str:
     drivers = get_nearest_drivers(phone=phone, village=village, landmark=landmark, limit=limit)
+
+    score_by_phone = {}
+    try:
+        tmp = []
+        for r in drivers:
+            phone_ = ""
+            eta_ = 999
+            lm_ = ""
+
+            # 1) PersonLocation-like objects (has .phone / .eta_minutes / .landmark)
+            if hasattr(r, "phone") or hasattr(r, "eta_minutes"):
+                phone_ = getattr(r, "phone", "") or ""
+                eta_ = getattr(r, "eta_minutes", 999)
+                lm_ = getattr(r, "landmark", "") or ""
+
+            # 2) tuples/lists
+            elif isinstance(r, (list, tuple)):
+                phone_ = r[0] if len(r) > 0 else ""
+                eta_   = r[1] if len(r) > 1 else 999
+                lm_    = r[2] if len(r) > 2 else ""
+
+            # 3) dicts
+            elif isinstance(r, dict):
+                phone_ = r.get("phone", "")
+                eta_   = r.get("eta_minutes", r.get("eta", 999))
+                lm_    = r.get("landmark", "") or ""
+
+            # 4) unknown
+            else:
+                phone_, eta_, lm_ = str(r), 999, ""
+
+            # DEMO inputs (so you SEE reordering) — replace later with real trust/fairness
+            digits = "".join(ch for ch in str(phone_) if ch.isdigit())
+            last = int(digits[-1]) if digits else 0
+            trust = 0.50
+            recent = 1
+            if last == 3:
+                trust, recent = 0.95, 0
+            elif last == 2:
+                trust, recent = 0.25, 3
+            elif last == 4:
+                trust, recent = 0.60, 1
+
+            d = {
+                "phone": phone_,
+                "eta_minutes": float(eta_ if eta_ is not None else 999),
+                "landmark": lm_ or "",
+                "trust_score": float(trust),
+                "recent_jobs": int(recent),
+                "expected_income": 0.0,
+                "_raw": r,
+            }
+            tmp.append(d)
+
+        tmp = _rank_riders_if_possible(tmp)
+
+        ranked_drivers = []
+        for d in tmp:
+            ph = d.get("phone", "")
+            ranked_drivers.append((ph, int(d.get("eta_minutes", 999)), d.get("landmark", "")))
+
+            try:
+                score_by_phone[ph] = explain_score(Candidate(
+                    phone=ph,
+                    eta_minutes=float(d.get("eta_minutes", 999)),
+                    trust_score=float(d.get("trust_score", 0.5)),
+                    recent_jobs=int(d.get("recent_jobs", 0)),
+                    expected_income=float(d.get("expected_income", 0)),
+                ))
+            except Exception:
+                pass
+
+        drivers = ranked_drivers
+
+    except Exception:
+        score_by_phone = {}
+
     lines = ["CON Nearest riders"]
-    if not drivers:
-        lines += ["No riders found.", "0. Back"]
-        return "\n".join(lines)
-
-    for i, d in enumerate(drivers, 1):
-        lm = d.landmark or "Unknown"
-        lines.append(f"{i}) {d.phone} ~{d.eta_minutes} min ({lm})")
-
+    i = 1
+    for (ph, eta, lm) in drivers:
+        suffix = ""
+        if ph in score_by_phone and score_by_phone[ph]:
+            suffix = " [" + score_by_phone[ph] + "]"
+        lines.append(f"{i}) {ph} ~{eta} min ({lm or 'Unknown'}){suffix}")
+        i += 1
     lines.append("0. Back")
     return "\n".join(lines)
 
