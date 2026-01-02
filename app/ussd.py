@@ -215,21 +215,6 @@ def save_landmark(phone: str, name: str, description: str):
 
 
 import os
-
-def community_group_label(phone: str) -> str:
-    """
-    Returns the local community group name based on country code.
-    +254 -> Sacco (Kenya)
-    +232 -> Osusu (Sierra Leone)
-    default -> Sacco
-    """
-    p = (phone or "").strip()
-    if p.startswith("+232"):
-        return "Osusu"
-    if p.startswith("+254"):
-        return "Sacco"
-    return "Sacco"
-
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -1731,16 +1716,16 @@ def handle_sacco_updates(raw: str, phone: str):
     parts = raw.split("*") if raw else []
 
     if raw == "5":
-        label = community_group_label(phone)
         return (
-            "CON " + label + " Line\n"
-            "1. Latest " + label + " updates\n"
-            "2. " + label + " principles & safety\n"
+            "CON Sacco Line\n"
+            "1. Latest Sacco updates\n"
+            "2. Sacco principles & safety\n"
             "3. Verified riders\n"
             "4. Report an issue\n"
-            "5. How " + label + " supports the community\n"
+            "5. How Sacco supports the community\n"
             "0. Back"
         )
+
     if raw == "5*1":
         return (
             "CON Sacco — latest\n"
@@ -1769,7 +1754,7 @@ def handle_sacco_updates(raw: str, phone: str):
             "1. " + mask_phone_public("+254700000002") + " (Bumala Sacco)",
             "2. " + mask_phone_public("+254700000005") + " (Market Route)",
             "",
-            "Verified by local " + community_group_label(phone) + " leadership."
+            "Verified by local Sacco leadership.",
             "0. Back",
         ]
         return "\n".join(lines)
@@ -1826,8 +1811,7 @@ def handle_sacco_updates(raw: str, phone: str):
     if raw == "5*0":
         return None
 
-    label = community_group_label(phone)
-    return "CON " + label + " Line\nInvalid option.\n0. Back"
+    return "CON Sacco Line\nInvalid option.\n0. Back"
 
 def handle_sacco_line(raw: str, phone: str) -> str:
     """
@@ -1838,25 +1822,562 @@ def handle_sacco_line(raw: str, phone: str) -> str:
     parts = (raw or "").split("*")
 
     if raw == "5":
-        label = community_group_label(phone)
+        return "\n".join([
+            "CON Sacco Line",
+            "1. Latest Sacco updates",
+            "2. How Sacco grows with Angelopp",
+            "3. Verified riders (soon)",
+            "4. Report issue (soon)",
+            "0. Back",
+        ])
+
+    # back
+    if len(parts) >= 2 and parts[1] == "0":
+        return "CON Back\n0. Back"
+
+    # latest updates
+    if len(parts) >= 2 and parts[1] == "1":
+        try:
+            rows = get_latest_messages("Sacco", limit=5)
+        except Exception:
+            rows = []
+        lines = ["CON Sacco — latest"]
+        if not rows:
+            lines.append("No updates yet.")
+        else:
+            for i, (chname, msg, _) in enumerate(rows, start=1):
+                txt = (msg or "").replace("\n"," ")
+                if len(txt) > 80:
+                    txt = txt[:80] + "…"
+                lines.append(f"{i}. {chname}: {txt}")
+        lines.append("0. Back")
+        return "\n".join(lines)
+
+    # explainer
+    if len(parts) >= 2 and parts[1] == "2":
+        return "\n".join([
+            "CON Sacco power",
+            "• Official Sacco channel for safety rules",
+            "• Verified riders list + ID checks",
+            "• Announce procedures + dispute handling",
+            "• Community trust + stable income",
+            "",
+            "Tip: create a channel in category 'Sacco'",
+            "then post updates for everyone.",
+            "0. Back",
+        ])
+
+    return "CON Sacco Line\nInvalid option.\n0. Back"
+
+def handle_listen_channels(raw: str) -> str:
+    parts = (raw or "").split("*")
+
+    # raw == "6" -> show categories
+    if raw == "6":
+        lines = ["Listen (channels)"]
+        for i, cat in enumerate(CHANNEL_CATEGORIES, start=1):
+            lines.append(f"{i}. {cat}")
+        lines.append("0. Back")
+        return "CON " + "\n".join(lines)
+
+    # raw like "6*1" -> list latest messages
+    if len(parts) >= 2 and parts[0] == "6":
+        choice = parts[1].strip()
+        if choice == "0":
+            return "CON Back\n0. Back"
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(CHANNEL_CATEGORIES):
+                cat = CHANNEL_CATEGORIES[idx]
+                # LISTEN_SAFE_V2: guard DB access so USSD never 500s
+                try:
+                    _rows = get_latest_messages(cat, limit=5)
+                except Exception:
+                    _rows = []
+                rows = _rows
+    # rows already set by LISTEN_SAFE_V2
+                lines = [f"{cat} — latest"]
+                if not rows:
+                    lines.append("No messages yet.")
+                else:
+                    for k, (name, text, _) in enumerate(rows, start=1):
+                        txt = (text or "").replace("\n", " ")
+                        if len(txt) > 60:
+                            txt = txt[:60] + "…"
+                        lines.append(f"{k}. {name}: {txt}")
+                lines.append("0. Back")
+                return "CON " + "\n".join(lines)
+
+    return "CON Listen\n0. Back"
+
+def handle_my_channel(raw: str, phone: str) -> str:
+    parts = (raw or "").split("*")
+    # raw == "7" -> show dashboard or create prompt
+    if raw == "7":
+        ch = get_my_channel(phone)
+        if not ch:
+            return "CON My channel\nYou don’t have a channel yet.\n1. Create my channel\n0. Back"
+        cid, name, cat = ch
         return (
-            "CON " + label + " Line\n"
-            "1. Latest " + label + " updates\n"
-            "2. " + label + " principles & safety\n"
-            "3. Verified riders\n"
-            "4. Report an issue\n"
-            "5. How " + label + " supports the community\n"
+            "CON My channel: " + name + "\n"
+            "1. Post message\n"
+            "2. View last message\n"
+            "3. Rename channel\n"
             "0. Back"
         )
 
-# --- public entrypoint expected by app.py ---
+    # If no channel yet and user selects create
+    if parts[0] == "7":
+        ch = get_my_channel(phone)
+
+        # Create flow:
+        # 7*1 -> ask name
+        if len(parts) == 2 and parts[1] == "1" and not ch:
+            return "CON Create channel\nType a name:"
+
+        # 7*1*<name> -> choose category
+        if len(parts) == 3 and parts[1] == "1" and not ch:
+            name = parts[2]
+            lines = ["CON Choose category:"]
+            for i, cat in enumerate(CHANNEL_CATEGORIES, start=1):
+                lines.append(f"{i}. {cat}")
+            lines.append("0. Cancel")
+            return "\n".join(lines)
+
+        # 7*1*<name>*<cat> -> create
+        if len(parts) >= 4 and parts[1] == "1" and not ch:
+            name = parts[2]
+            c = parts[3].strip()
+            if c == "0":
+                return "CON Cancelled\n0. Back"
+            if c.isdigit():
+                idx = int(c) - 1
+                cat = CHANNEL_CATEGORIES[idx] if 0 <= idx < len(CHANNEL_CATEGORIES) else "Community"
+                cid = create_channel(phone, name, cat)
+                return f"CON Channel created ✓\nName: {name[:24]}\nCategory: {cat}\n0. Back"
+
+        # Existing channel actions
+        if ch:
+            cid, name, cat = ch
+
+            # Post message:
+            # 7*1 -> ask text
+            if len(parts) == 2 and parts[1] == "1":
+                if not can_post_today(cid):
+                    return "CON Limit reached\nYou can post 1 message/day.\n0. Back"
+                return "CON Post message (max 240 chars):"
+
+
+        # POST_MESSAGE_V1:
+        # 7*1*<text> -> save message to DB (never 500)
+        if len(parts) >= 3 and parts[1] == "1" and ch:
+            msg = "*".join(parts[2:]).strip()
+            if not msg:
+                return "CON Empty message.\n0. Back"
+            if len(msg) > 240:
+                msg = msg[:240]
+
+            try:
+                cid, cname, ccat = ch  # from get_my_channel()
+                conn = db()
+                ensure_messages(conn)
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO messages(channel_id, category, author_phone, text) VALUES (?,?,?,?)",
+                    (int(cid), str(ccat or ""), str(phone or ""), str(msg))
+                )
+                conn.commit()
+                # OUTIXs: reward publishing useful info (fail-safe)
+                try:
+                    award_points(phone, 1, reason="POST_MESSAGE", meta="channel")
+                except Exception:
+                    pass
+                return "CON Posted ✓\n0. Back"
+            except Exception:
+                return "CON Could not post now.\n0. Back"
+
+            # 7*1*<text> -> save
+            if len(parts) >= 3 and parts[1] == "1":
+                if not can_post_today(cid):
+                    return "CON Limit reached\nYou can post 1 message/day.\n0. Back"
+                text = "*".join(parts[2:])  # keep '*' typed content
+                post_message(cid, text)
+                return "CON Posted ✓\n0. Back"
+
+            # View last:
+            if len(parts) == 2 and parts[1] == "2":
+                conn = _db()
+                cur = conn.cursor()
+                cur.execute("SELECT text, created_at FROM messages WHERE channel_id=? ORDER BY id DESC LIMIT 1", (cid,))
+                row = cur.fetchone()
+                conn.close()
+                if not row:
+                    return "CON No messages yet.\n0. Back"
+                text, ts = row
+                text = (text or "").replace("\n", " ")
+                return f"CON Last message:\n{text}\n0. Back"
+
+            # Rename:
+            # 7*3 -> ask new name
+            if len(parts) == 2 and parts[1] == "3":
+                return "CON Rename channel\nType new name:"
+
+            # 7*3*<newname> -> save
+            if len(parts) >= 3 and parts[1] == "3":
+                newname = parts[2].strip()[:24] or "My Channel"
+                conn = _db()
+                cur = conn.cursor()
+                cur.execute("UPDATE channels SET name=? WHERE id=?", (newname, cid))
+                conn.commit()
+                conn.close()
+                return f"CON Renamed ✓\nNew name: {newname}\n0. Back"
+
+    return "CON My channel\n0. Back"
+
+# -----------------------------
+# New handle_ussd: onboarding gate first, then existing logic
+# -----------------------------
 def handle_ussd(session_id: str, phone_number: str, text: str):
+    phone = (phone_number or "").strip()
     raw = (text or "").strip()
+
+    
+
+    # BIZ_BACK_TO_ROOT_V1: ensure businesses back-to-root never hits legacy directory
+    if raw == "2*0":
+        try:
+            return handle_ussd(session_id=session_id, phone_number=phone_number, text="")
+        except Exception:
+            # last resort: behave like top-level root
+            return handle_ussd(session_id=session_id, phone_number=phone_number, text="")
+# 1) If onboarding not complete, return onboarding screens
+    resp = onboarding.onboarding_response(session_id=session_id, phone=phone, text=raw)
+    if resp is not None:
+        return (resp, 200)
+
+    # 2) Onboarded: show new "Role Home" when user starts (empty text)
     try:
-        return handle_ussd_core(
-            session_id=session_id,
-            phone_number=phone_number,
-            text=raw
-        )
+        prefs = onboarding.get_prefs(phone)
     except Exception:
-        return ("CON Temporary error. Please try again.\n0. Back", 200)
+        prefs = {"role": "customer", "area_type": "village", "landmark": "Church"}
+
+    role = (prefs.get("role") or "customer").strip().lower()
+    area = (prefs.get("area_type") or "village").strip()
+    village = get_pref_village(phone, fallback="Church")
+    landmark = (prefs.get("landmark") or "").strip()
+    # Exit if user explicitly chooses 0 at top-level
+    last = raw.split("*")[-1] if raw else ""
+
+    if raw == "":
+        title = "Customer" if role == "customer" else "Service Provider"
+        menu = f"""{title} (village: {village})
+1. Find a Rider ->
+2. Local Businesses
+3. Register (Rider / Business)
+4. Change my place
+5. Sacco Line ->
+6. Listen (channels)
+7. My channel
+8. Travel ->
+9. Switch role
+0. Exit"""
+        return ("CON " + menu, 200)
+
+    # Intercepts (before core)
+
+    # Channels (6/7) — handled here so core routes remain unchanged
+    # Listen (channels)
+    # Sacco Line (option 5)
+    # Sacco Line (option 5) — handled here so core remains unchanged
+    if raw == "5" or raw.startswith("5*"):
+        # Back-to-root behavior: 5*0 should return the real root (text="")
+        if raw == "5*0" or raw.startswith("5*0*"):
+            return handle_ussd(session_id=session_id, phone_number=phone, text="")
+        return (handle_sacco_updates(raw, phone), 200)
+
+    if raw == "6" or raw.startswith("6*"):
+        return (handle_listen_channels(raw), 200)
+
+    # My channel
+    if raw == "7" or raw.startswith("7*"):
+        return (handle_my_channel(raw, phone), 200)
+
+    # BUSINESSES_ROUTER_V3: force businesses flow through handle_businesses_v2 (never 500)
+    if raw == "2" or raw.startswith("2*"):
+        parts = (raw or "").split("*")
+        return (handle_businesses_v2(parts, session_id=session_id, phone=phone), 200)
+
+    if last == "0":
+        return ("END Bye.", 200)
+
+    if last == "4":
+        # Keep role, reset place => onboarding will ask area/landmark again
+        try:
+            onboarding.clear_location(phone)
+        except Exception:
+            pass
+        # Ask area again
+        r2 = onboarding.onboarding_response(session_id=session_id, phone=phone, text="")
+        return ((r2 or """CON Choose your area:
+1. Village
+2. Town/City
+3. Airport
+0. Back"""), 200)
+
+    if last == "9":
+        # Reset everything => onboarding will ask role again
+        try:
+            onboarding.clear_role(phone)
+        except Exception:
+            pass
+        r2 = onboarding.onboarding_response(session_id=session_id, phone=phone, text="")
+        return ((r2 or """CON Angelopp
+1. I am a Customer
+2. I am a Service Provider
+0. Exit"""), 200)
+
+    # 3) Otherwise: run the original logic
+    return handle_ussd_core(session_id=session_id, phone_number=phone_number, text=raw)
+
+
+# ============================================================
+# Travel (customer submenu) - placeholder flow
+# ============================================================
+def handle_travel(parts, session_id: str, phone: str):
+    """
+    Travel submenu (Customer).
+    Uses ussd_response() so output is always CON/END compatible with Africa's Talking.
+    Flow:
+      8               -> menu
+      8*0             -> back to root
+      8*1             -> Plan a trip (asks From)
+      8*1*<FROM>      -> asks To
+      8*1*<FROM>*<TO> -> shows summary (placeholder)
+      8*2             -> Find transport (placeholder)
+      8*3             -> My trips (placeholder)
+    """
+    def _resp(body: str):
+        # Prefer the project's wrapper (adds CON/END, etc.)
+        if "ussd_response" in globals():
+            return ussd_response(body), 200
+        # Fallback (shouldn't happen in your project)
+        body = body.strip("\n")
+        if not (body.startswith("CON ") or body.startswith("END ")):
+            body = "CON " + body
+        return body, 200
+
+    # 8 -> show menu
+    if len(parts) == 1:
+        return _resp(
+            "Travel\n"
+            "1. Plan a trip\n"
+            "2. Find transport\n"
+            "3. My trips (soon)\n"
+            "0. Back"
+        )
+
+    choice = parts[1]
+
+    # Back -> root menu (role-aware root will be applied there)
+    if choice == "0":
+        if "handle_ussd_core" in globals():
+            return handle_ussd_core(session_id=session_id, phone_number=phone, text="")
+        return _resp("Back\n0. Exit")
+
+    # 1) Plan a trip (simple wizard)
+    if choice == "1":
+        if len(parts) == 2:
+            return _resp("Plan a trip\nFrom (type a place):\n0. Back")
+        if len(parts) == 3:
+            frm = parts[2].strip()[:32]
+            return _resp(f"Plan a trip\nFrom: {frm}\nTo (type a place):\n0. Back")
+        if len(parts) >= 4:
+            frm = parts[2].strip()[:32]
+            to = parts[3].strip()[:32]
+            return _resp(
+                "Trip draft\n"
+                f"From: {frm}\n"
+                f"To: {to}\n"
+                "Next: we can add date/time + budget + save it.\n"
+                "0. Back"
+            )
+
+    # 2) Find transport (placeholder)
+    if choice == "2":
+        return _resp(
+            "Find transport (soon)\n"
+            "1. Boda / Rider\n"
+            "2. Tuktuk\n"
+            "3. Bus\n"
+            "0. Back"
+        )
+
+    # 3) My trips (placeholder)
+    if choice == "3":
+        return _resp("My trips (soon)\n0. Back")
+
+    return _resp("Invalid option.\n0. Back")
+
+
+
+
+# ============================================================
+# Businesses (robust v2) - avoids 500s, uses providers table if present
+# ============================================================
+
+
+# ============================================================
+# Change place V3 (safe) — persists user_prefs.village
+# ============================================================
+def handle_change_place_v3(parts, phone: str):
+    # parts[0] == "4"
+    if parts == ["4"]:
+        return ussd_response(
+            "CON Choose your area:\n"
+            "1. Village\n"
+            "2. Town/City\n"
+            "3. Airport\n"
+            "0. Back"
+        ), 200
+
+    if len(parts) >= 2 and parts[1] == "1":
+        # Village flow
+        if len(parts) == 2:
+            return ussd_response(
+                "CON Choose your village:\n"
+                "1. Bumala\n"
+                "2. Butula\n"
+                "3. Busia\n"
+                "0. Back"
+            ), 200
+
+        # Pick village
+        choice = parts[2]
+        if choice == "0":
+            return ussd_response(main_menu()), 200
+
+        # Map choice -> name
+        v = None
+        try:
+            v = village_name_from_choice(choice)
+        except Exception:
+            pass
+        if not v:
+            # fallback hard-map
+            v = {"1": "Bumala", "2": "Butula", "3": "Busia"}.get(choice)
+
+        if not v:
+            return ussd_response("CON Invalid option.\n0. Back"), 200
+
+        # Persist
+        try:
+            conn = db()
+            ensure_user_prefs(conn)
+            cur = conn.cursor()
+            # Upsert (SQLite)
+            cur.execute("""
+                INSERT INTO user_prefs (phone, village, updated_at)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(phone) DO UPDATE SET
+                    village=excluded.village,
+                    updated_at=datetime('now')
+            """, (normalize_phone(phone), v))
+            conn.commit()
+        except Exception:
+            # never break flow
+            pass
+
+        return ussd_response(f"CON Location set ✓\nVillage: {v}\n0. Back"), 200
+
+    if len(parts) >= 2 and parts[1] == "2":
+        return ussd_response("CON Town/City (soon)\n0. Back"), 200
+
+    if len(parts) >= 2 and parts[1] == "3":
+        return ussd_response("CON Airport (soon)\n0. Back"), 200
+
+    if len(parts) >= 2 and parts[1] == "0":
+        return ussd_response(main_menu()), 200
+
+    return ussd_response("CON Invalid option.\n0. Back"), 200
+def handle_businesses_v2(parts, session_id: str, phone: str):
+    """
+    Businesses flow (safe, never 500):
+      2                  -> choose village
+      2*<vchoice>         -> list in village
+      2*<vchoice>*<idx>   -> detail
+    vchoice can be '1/2/3' or a village name.
+    """
+    try:
+        if not parts or parts[0] != "2":
+            return "CON Invalid option.\n0. Back"
+
+        # 2 -> village menu
+        if len(parts) == 1:
+            lines = ["CON Businesses in which village?"]
+            for code, name in _biz_village_pairs():
+                # ensure codes are 1..N as USSD expects
+                # if code isn't numeric, still display sequentially
+                lines.append(f"{code}. {name}")
+            lines.append("0. Back")
+            return "\n".join(lines)
+
+        # back
+        if parts[1] == "0":
+            return "CON " + main_menu(phone)
+
+        v = _biz_village_from_choice(parts[1])
+        if not v:
+            return "CON Invalid village.\n0. Back"
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT phone, name, COALESCE(current_landmark,'') AS landmark
+            FROM providers
+            WHERE lower(trim(provider_type))='business'
+              AND trim(village)=trim(?)
+            ORDER BY name
+            LIMIT 20
+        """, (v,))
+        rows = cur.fetchall() or []
+
+        # 2*<v> -> list
+        if len(parts) == 2:
+            lines = [f"CON Businesses in {v}"]
+            if not rows:
+                lines.append("No businesses yet.")
+                lines.append("0. Back")
+                return "\n".join(lines)
+            for i, r in enumerate(rows, start=1):
+                nm = (r["name"] if hasattr(r, "__getitem__") else r[1]) or "Business"
+                lines.append(f"{i}. {nm} ->")
+            lines.append("0. Back")
+            return "\n".join(lines)
+
+        # 2*<v>*<idx>
+        idx_raw = (parts[2] or "").strip() if len(parts) >= 3 else ""
+        if idx_raw == "0":
+            return f"CON Businesses in {v}\n0. Back"
+
+        try:
+            idx = int(idx_raw) - 1
+        except Exception:
+            return "CON Invalid option.\n0. Back"
+
+        if idx < 0 or idx >= len(rows):
+            return "CON Invalid business.\n0. Back"
+
+        r = rows[idx]
+        bphone = r["phone"] if hasattr(r, "__getitem__") else r[0]
+        bname  = r["name"] if hasattr(r, "__getitem__") else r[1]
+        blm    = r["landmark"] if hasattr(r, "__getitem__") else r[2]
+
+        lines = ["CON Business", f"Name: {bname}", f"Phone: {bphone}"]
+        if blm:
+            lines.append(f"Place: {blm}")
+        lines.append("0. Back")
+        return "\n".join(lines)
+
+    except Exception:
+        return "CON Businesses\nTemporary error.\n0. Back"
+
