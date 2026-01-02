@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-import os, sqlite3, hashlib, re, argparse
+import argparse
+import sqlite3
+import hashlib
+import os
+import re
 
 DB_PATH = os.environ.get("ANGELOPP_DB", "/opt/angelopp/data/bumala.db")
 ANON_SALT = os.environ.get("ANGELOPP_ANON_SALT", "angelopp-public-v1")
@@ -28,29 +32,48 @@ def anon_user(phone: str) -> str:
     raw = (ANON_SALT + '|' + (phone or '')).encode('utf-8')
     return 'u_' + hashlib.sha256(raw).hexdigest()[:10]
 
-def is_category_public(con: sqlite3.Connection, category: str) -> bool:
-    cat = (category or '').strip()
-    cur = con.cursor()
-    cur.execute("SELECT is_public FROM public_policy WHERE category=?", (cat,))
-    row = cur.fetchone()
-    return bool(row) and int(row[0] or 0) == 1
+def ttl_to_expires(ttl: str | None) -> str | None:
+    """
+    ttl examples:
+      24h, 7d, 90d, 0 (means no expiry), none
+    """
+    if not ttl or ttl.lower() in ("none", "null"):
+        return None
+    ttl = ttl.strip().lower()
+    if ttl == "0":
+        return None
+    # SQLite-friendly datetime add: datetime('now', '+24 hours'), '+7 days'
+    if ttl.endswith("h"):
+        n = int(ttl[:-1])
+        return f"datetime('now','+{n} hours')"
+    if ttl.endswith("d"):
+        n = int(ttl[:-1])
+        return f"datetime('now','+{n} days')"
+    raise ValueError("Bad ttl format. Use 24h / 7d / 90d / none / 0")
 
-def publish(category: str, limit: int, since_id: int|None, dry: bool):
+def is_category_public(con, category: str) -> bool:
+    cur = con.cursor()
+    cur.execute("SELECT is_public FROM public_policy WHERE category=?", (category,))
+    r = cur.fetchone()
+    return bool(r and int(r[0] or 0) == 1)
+
+def publish(category: str, limit: int, since_id: int|None, dry_run: bool, ttl: str|None, pin: bool):
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     cur = con.cursor()
 
-    # policy gate (hard)
+    # Guard: category must be public in policy
     if not is_category_public(con, category):
-        raise SystemExit(f"Category '{category}' is not public (public_policy). Enable it first if intended.")
+        print(f"Refusing: category '{category}' is not public in public_policy (set is_public=1 to allow publishing).")
+        con.close()
+        return
 
     where = "WHERE category=?"
     params = [category]
     if since_id is not None:
-        where += " AND id > ?"
+        where += " AND id>=?"
         params.append(since_id)
 
-    # grab newest first, publish oldest-first to preserve chronology
     cur.execute(f"""
       SELECT id, channel_id, category, author_phone, text, created_at
       FROM messages
@@ -58,63 +81,68 @@ def publish(category: str, limit: int, since_id: int|None, dry: bool):
       ORDER BY id DESC
       LIMIT ?
     """, (*params, limit))
-    rows = list(cur.fetchall())
-    rows.reverse()
+    rows = cur.fetchall()
 
-    # skip already published by source_message_id
-    to_insert = []
-    for r in rows:
+    # If TTL specified -> compute expires SQL expression string, else default 24h for text
+    expires_expr = None
+    if ttl is None:
+        expires_expr = "datetime('now','+24 hours')"   # default for text posts
+    else:
+        e = ttl_to_expires(ttl)
+        expires_expr = e  # may be None
+
+    published = 0
+    for r in rows[::-1]:
         mid = int(r["id"])
+        # skip if already published
         cur.execute("SELECT 1 FROM public_messages WHERE source_message_id=? LIMIT 1", (mid,))
         if cur.fetchone():
             continue
-        to_insert.append(r)
 
-    if dry:
-        print(f"[DRY] would publish {len(to_insert)} message(s) from category={category}")
-        if to_insert:
-            r = to_insert[-1]
-            print("[DRY] last sample:", scrub_public_text(r["text"]))
-        return
+        author = anon_user(r["author_phone"] or "")
+        text = scrub_public_text(r["text"] or "")
 
-    for r in to_insert:
-        mid = int(r["id"])
-        author = anon_user(r["author_phone"])
-        text = scrub_public_text(r["text"])
+        if dry_run:
+            print(f"[DRY] publish message_id={mid} -> author={author} text={text[:80]!r}")
+            continue
+
+        # expires_at: store a concrete timestamp (string) by asking SQLite to compute it
+        expires_at_val = None
+        if pin:
+            expires_at_val = None
+        elif expires_expr is None:
+            expires_at_val = None
+        else:
+            cur.execute(f"SELECT {expires_expr}")
+            expires_at_val = cur.fetchone()[0]
+
         cur.execute("""
           INSERT INTO public_messages
-            (source_message_id, category, channel_id, author_anon, text, created_at, published_at, is_hidden, note)
-          VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 0, '')
-        """, (mid, r["category"], int(r["channel_id"] or 0), author, text, r["created_at"]))
-    con.commit()
-    print(f"Published {len(to_insert)} message(s) to public_messages (category={category}).")
+            (channel_id, category, author_anon, channel_name, text, created_at,
+             source_message_id, published_at, is_hidden, note,
+             media_type, media_ref, expires_at, is_pinned)
+          VALUES
+            (?, ?, ?, '', ?, ?, ?, datetime('now'), 0, '', 'text', '', ?, ?)
+        """, (
+          r["channel_id"], r["category"], author, text, r["created_at"],
+          mid, expires_at_val, 1 if pin else 0
+        ))
+        published += 1
 
-def hide(pub_id: int, note: str):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("UPDATE public_messages SET is_hidden=1, note=? WHERE id=?", (note or "", pub_id))
     con.commit()
-    print(f"Hidden public_messages.id={pub_id}")
+    con.close()
+    print(f"Published {published} message(s) to public_messages (category={category}).")
 
 def main():
-    ap = argparse.ArgumentParser(description="Explicit publish step for Angelopp public feed")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-
-    p1 = sub.add_parser("publish", help="Publish from messages -> public_messages (scrubbed)")
-    p1.add_argument("--category", required=True, help="e.g. Community")
-    p1.add_argument("--limit", type=int, default=50)
-    p1.add_argument("--since-id", type=int, default=None)
-    p1.add_argument("--dry-run", action="store_true")
-
-    p2 = sub.add_parser("hide", help="Hide a public message (moderation)")
-    p2.add_argument("--id", type=int, required=True)
-    p2.add_argument("--note", default="")
-
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--category", default="Community")
+    ap.add_argument("--limit", type=int, default=10)
+    ap.add_argument("--since-id", type=int, default=None)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--ttl", default=None, help="e.g. 24h, 7d, 90d, none, 0")
+    ap.add_argument("--pin", action="store_true", help="publish as pinned (never expires)")
     args = ap.parse_args()
-    if args.cmd == "publish":
-        publish(args.category, args.limit, args.since_id, args.dry_run)
-    elif args.cmd == "hide":
-        hide(args.id, args.note)
+    publish(args.category, args.limit, args.since_id, args.dry_run, args.ttl, args.pin)
 
 if __name__ == "__main__":
     main()

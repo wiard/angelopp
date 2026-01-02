@@ -3,6 +3,7 @@ import sqlite3
 import hashlib
 import os
 import re
+import datetime
 from pathlib import Path
 
 from ussd import handle_ussd, normalize_phone
@@ -175,7 +176,96 @@ def public_stats():
     con.close()
     return jsonify({"ok": True, "total_messages": total, "by_category": by_category, "by_day_last_14": by_day})
 
-if __name__ == "__main__":
+
+@app.route("/public/digest")
+def public_digest():
+    """
+    Small 'headlines' digest for SMS/USSD:
+    - totals per category (public + visible)
+    - last N items text-only, scrubbed already in public_messages
+    """
+    limit = int(request.args.get("limit","10") or 10)
+    limit = max(1, min(50, limit))
+    con = db()
+    cur = con.cursor()
+
+    # categories that are public in policy
+    cur.execute("SELECT category FROM public_policy WHERE is_public=1")
+    cats = [r[0] for r in cur.fetchall()]
+
+    # counts from public_messages (only not hidden + not expired unless pinned)
+    cur.execute("""
+      SELECT category, COUNT(*) AS c
+      FROM public_messages
+      WHERE is_hidden=0
+        AND (COALESCE(is_pinned,0)=1 OR expires_at IS NULL OR expires_at >= datetime('now'))
+      GROUP BY category
+      ORDER BY c DESC
+    """)
+    by_cat = [{"category": r[0], "count": int(r[1] or 0)} for r in cur.fetchall()]
+
+    # latest items (across categories) — text only
+    cur.execute("""
+      SELECT id, category, channel_id, author_anon, text, created_at
+      FROM public_messages
+      WHERE is_hidden=0
+        AND media_type='text'
+        AND (COALESCE(is_pinned,0)=1 OR expires_at IS NULL OR expires_at >= datetime('now'))
+      ORDER BY id DESC
+      LIMIT ?
+    """, (limit,))
+    items = []
+    for r in cur.fetchall():
+        items.append({
+            "id": r[0],
+            "category": r[1],
+            "channel_id": r[2],
+            "author": r[3],
+            "text": r[4],
+            "created_at": r[5],
+        })
+
+    con.close()
+    return jsonify({"ok": True, "limit": limit, "policy_public_categories": cats, "by_category": by_cat, "items": items})
+
+
+@app.route("/public/voice/latest")
+def public_voice_latest():
+    """
+    Future-proof: list latest VOICE items (public, not expired, not hidden).
+    For now, it may be empty until you start publishing voice with media_type='voice'.
+    """
+    limit = int(request.args.get("limit","10") or 10)
+    limit = max(1, min(50, limit))
+    con = db()
+    cur = con.cursor()
+    cur.execute("""
+      SELECT id, category, channel_id, author_anon, text, media_ref, created_at, expires_at, is_pinned
+      FROM public_messages
+      WHERE is_hidden=0
+        AND media_type='voice'
+        AND (COALESCE(is_pinned,0)=1 OR expires_at IS NULL OR expires_at >= datetime('now'))
+      ORDER BY id DESC
+      LIMIT ?
+    """, (limit,))
+    items = []
+    for r in cur.fetchall():
+        items.append({
+            "id": r[0],
+            "category": r[1],
+            "channel_id": r[2],
+            "author": r[3],
+            "transcript": r[4],  # text can store transcript/summary
+            "media_ref": r[5],   # url/path later
+            "created_at": r[6],
+            "expires_at": r[7],
+            "pinned": bool(r[8]),
+        })
+    con.close()
+    return jsonify({"ok": True, "limit": limit, "items": items})
+
+
+if __name__ == '__main__':
     # dev server
     port = int(os.environ.get("PORT", "5002"))
     app.run(host="127.0.0.1", port=port)
