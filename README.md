@@ -36,3 +36,55 @@ Angelopp is built for communities where trust is social before it is digital.
 - Blockchain is memory, not control
 
 Together, Angelopp and Outixs create a verifiable, non-extractive digital infrastructure for local governance, fairness, and growth.
+
+## Angelopp Core – Responsibilities
+
+Angelopp is **lokale digitale infrastructuur**, geen platform.
+De core doet bewust alleen wat lokaal, eerlijk en transparant moet zijn.
+
+### What Angelopp Core Handles
+
+**Menu logic**
+- USSD menu’s en flows
+- Context-aware navigatie (waar was de gebruiker?)
+
+**Role recognition**
+- Customer / Service Provider / Traveler
+- Rol wordt onthouden per telefoonnummer
+- Gebruiker kan rol altijd wisselen
+
+**State & context**
+- Sessies (USSD)
+- Persistente context (rol, village, landmark)
+- Concepten zoals “draft trip” of “pending request”
+
+**Local rules**
+- Dorpsregels (zones, tijden, type service)
+- Sacco- of community-afspraken
+- Geen centrale algoritmes
+
+**Fairness & trust**
+- Matching op meer dan afstand:
+  ETA, veiligheid, vertrouwen, fairness
+- Basis reputatie (lichtgewicht, USSD-proof)
+- Community oversight mogelijk
+
+**Proof & anchoring (Outixs)**
+- Matches en afspraken kunnen geankerd worden
+- Bewijs zonder gevoelige data
+- Voor transparantie en vertrouwen
+
+### What Angelopp Intentionally Outsources
+
+- Payments (e.g. M-Pesa, STK Push)
+- SMS delivery & callbacks
+- Voice / IVR / calls
+- Identity verification (optioneel)
+
+Angelopp **orchestrates**, partners **execute**.
+
+This keeps the system:
+- Simple
+- Replaceable
+- Locally owned
+- Scalable across villages
