@@ -1770,32 +1770,36 @@ def get_latest_messages(category: str, limit: int = 5):
 
 def handle_sacco_updates(raw: str, phone: str) -> str:
     """
-    Sacco Line (menu option 5) — must never 500.
+    Sacco Line (menu option 5)
+    - 5        : menu
+    - 5*1      : latest sacco updates (channel_messages category Sacco)
+    - 5*2      : explanation / why Sacco grows
+    - 5*3      : verified riders list (from sacco_verified_riders + providers)
+    - 5*4      : report issue flow (store in sacco_issues)
+      - 5*4              -> prompt for text
+      - 5*4*<issue_text> -> save
+    - 5*0      : back
     """
     parts = (raw or "").split("*")
 
-    # 5 -> show menu
-    if raw == "5" or (len(parts) == 1):
+    # back to root
+    if len(parts) >= 2 and parts[1] == "0":
+        return "CON Back\n0. Back"
+
+    # base menu
+    if raw == "5" or len(parts) == 1:
         return "\n".join([
             "CON Sacco Line",
             "1. Latest Sacco updates",
             "2. How Sacco grows with Angelopp",
-            "3. Verified riders (soon)",
-            "4. Report issue (soon)",
+            "3. Verified riders",
+            "4. Report issue",
             "0. Back",
         ])
 
-    # safety
-    if len(parts) < 2:
-        return "CON Sacco Line\n0. Back"
+    opt = parts[1].strip() if len(parts) >= 2 else ""
 
-    opt = (parts[1] or "").strip()
-
-    # 0 -> caller should handle back-to-root (we keep a clean back screen here)
-    if opt == "0":
-        return "CON Back\n0. Back"
-
-    # 1 -> latest sacco posts (from channel category "Sacco")
+    # 5*1 Latest Sacco updates (uses existing listen categories via get_latest_messages)
     if opt == "1":
         try:
             rows = get_latest_messages("Sacco", limit=5)
@@ -1805,15 +1809,15 @@ def handle_sacco_updates(raw: str, phone: str) -> str:
         if not rows:
             lines.append("No updates yet.")
         else:
-            for i, (name, text, _) in enumerate(rows, start=1):
+            for k, (name, text, _) in enumerate(rows, start=1):
                 txt = (text or "").replace("\n", " ")
-                if len(txt) > 60:
-                    txt = txt[:60] + "…"
-                lines.append(f"{i}. {name}: {txt}")
+                if len(txt) > 70:
+                    txt = txt[:70] + "…"
+                lines.append(f"{k}. {name}: {txt}")
         lines.append("0. Back")
         return "\n".join(lines)
 
-    # 2 -> info text
+    # 5*2 Sacco power explainer
     if opt == "2":
         return "\n".join([
             "CON Sacco power",
@@ -1827,13 +1831,107 @@ def handle_sacco_updates(raw: str, phone: str) -> str:
             "0. Back",
         ])
 
-    # 3/4 -> placeholders
+    # 5*3 Verified riders list
     if opt == "3":
-        return "CON Verified riders\nComing soon.\n0. Back"
-    if opt == "4":
-        return "CON Report issue\nComing soon.\n0. Back"
+        try:
+            conn = db()
+            cur = conn.cursor()
 
+            # Join with providers if present for names/landmarks; otherwise show phone only.
+            # providers schema in your project: phone, provider_type, name, village, current_landmark, is_available, ...
+            cur.execute("""
+                SELECT v.rider_phone,
+                       COALESCE(p.name,'') AS name,
+                       COALESCE(p.village,'') AS village,
+                       COALESCE(p.current_landmark,'') AS lm,
+                       COALESCE(v.sacco,'') AS sacco,
+                       COALESCE(v.note,'') AS note,
+                       v.verified_at
+                FROM sacco_verified_riders v
+                LEFT JOIN providers p
+                  ON trim(p.phone)=trim(v.rider_phone)
+                 AND lower(trim(p.provider_type))='rider'
+                ORDER BY v.verified_at DESC
+                LIMIT 9
+            """)
+            rows = cur.fetchall() or []
+        except Exception:
+            rows = []
+
+        lines = ["CON Verified riders"]
+        if not rows:
+            lines += [
+                "No verified riders yet.",
+                "Tip: add a rider phone to sacco_verified_riders table.",
+                "0. Back"
+            ]
+            return "\n".join(lines)
+
+        for i, r in enumerate(rows, start=1):
+            # sqlite Row or tuple
+            try:
+                phone_r = r["rider_phone"]
+                name = (r["name"] or "").strip()
+                village = (r["village"] or "").strip()
+                lm = (r["lm"] or "").strip()
+                sacco = (r["sacco"] or "").strip()
+            except Exception:
+                phone_r, name, village, lm, sacco = r[0], r[1], r[2], r[3], r[4]
+
+            label = name if name else phone_r
+            extra = []
+            if village:
+                extra.append(village)
+            if lm:
+                extra.append(lm)
+            if sacco:
+                extra.append(sacco)
+            suffix = f" ({' / '.join(extra)})" if extra else ""
+            lines.append(f"{i}. {label}{suffix}")
+
+        lines.append("0. Back")
+        return "\n".join(lines)
+
+    # 5*4 Report issue flow
+    if opt == "4":
+        # prompt
+        if len(parts) == 2:
+            return "\n".join([
+                "CON Report issue",
+                "Type your issue (max 200 chars):"
+            ])
+
+        # submit
+        issue_text = "*".join(parts[2:]).strip()
+        if not issue_text:
+            return "CON Report issue\nEmpty message.\n0. Back"
+
+        if len(issue_text) > 200:
+            issue_text = issue_text[:200]
+
+        try:
+            v = ""
+            try:
+                v = get_pref_village(phone, fallback="")  # safe
+            except Exception:
+                v = ""
+
+            conn = db()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO sacco_issues(from_phone, village, issue_text)
+                VALUES(?,?,?)
+            """, (normalize_phone(phone), v, issue_text))
+            conn.commit()
+        except Exception:
+            # Never 500
+            return "CON Report issue\nTemporary error.\n0. Back"
+
+        return "CON Reported ✓\nThank you.\n0. Back"
+
+    # fallback
     return "CON Sacco Line\nInvalid option.\n0. Back"
+
 
 def handle_sacco_line(raw: str, phone: str) -> str:
     """
