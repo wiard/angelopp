@@ -1836,14 +1836,14 @@ def handle_ussd(session_id: str, phone_number: str, text: str):
 
     role = (prefs.get("role") or "customer").strip().lower()
     area = (prefs.get("area_type") or "village").strip()
-    landmark = (prefs.get("landmark") or "Church").strip()
-
+    village = get_pref_village(phone, fallback="Church")
+    landmark = (prefs.get("landmark") or "").strip()
     # Exit if user explicitly chooses 0 at top-level
     last = raw.split("*")[-1] if raw else ""
 
     if raw == "":
         title = "Customer" if role == "customer" else "Service Provider"
-        menu = f"""{title} ({area}: {landmark})
+        menu = f"""{title} (village: {village})
 1. Find a Rider ->
 2. Local Businesses
 3. Register (Rider / Business)
