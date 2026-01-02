@@ -768,176 +768,57 @@ def display_name(phone: str) -> str:
 # CHALLENGE / POINTS
 # =========================
 
-def award_points(phone: str, reason: str, pts: int) -> None:
-    phone = normalize_phone(phone)
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO points (phone, reason, pts, created_at) VALUES (?, ?, ?, datetime('now'))",
-                (phone, reason, int(pts)))
-    conn.commit()
-    conn.close()
-
-
-def has_claimed_today(phone: str, reason: str) -> bool:
-    phone = normalize_phone(phone)
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-    SELECT 1
-    FROM points
-    WHERE phone = ? AND reason = ?
-      AND date(created_at) = date('now')
-    LIMIT 1
-    """, (phone, reason))
-    ok = cur.fetchone() is not None
-    conn.close()
-    return ok
-
-
-def add_landmark(phone: str, village: str, name: str) -> None:
-    phone = normalize_phone(phone)
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-    INSERT INTO landmarks (village, name, added_by, created_at)
-    VALUES (?, ?, ?, datetime('now'))
-    """, (village, name.strip(), phone))
-    conn.commit()
-    conn.close()
-
-
-def weekly_leaderboard(days: int = 7, limit: int = 3) -> str:
-    conn = db()
-    cur = conn.cursor()
-
-    # Landmarks per village (last N days)
-    cur.execute(f"""
-    SELECT village, COUNT(*) AS c
-    FROM landmarks
-    WHERE datetime(created_at) >= datetime('now', '-{int(days)} days')
-    GROUP BY village
-    ORDER BY c DESC
-    LIMIT ?
-    """, (limit,))
-    lm_rows = cur.fetchall()
-
-    # Helper points (last N days)
-    cur.execute(f"""
-    SELECT phone, SUM(pts) AS s
-    FROM points
-    WHERE datetime(created_at) >= datetime('now', '-{int(days)} days')
-    GROUP BY phone
-    ORDER BY s DESC
-    LIMIT ?
-    """, (limit,))
-    pt_rows = cur.fetchall()
-
-    conn.close()
-
-    lines = [f"CON Weekly {ICON_STAR} ({days}d)"]
-
-    lines.append("LM top3:")
-    if lm_rows:
-        for i, r in enumerate(lm_rows, start=1):
-            lines.append(f"{i}) {r['village']} x{int(r['c'])}")
-    else:
-        lines.append("No landmarks yet.")
-
-    lines.append("Helpers top3:")
-    if pt_rows:
-        for i, r in enumerate(pt_rows, start=1):
-            lines.append(f"{i}) {display_name(r['phone'])} +{int(r['s'])}")
-    else:
-        lines.append("No points yet.")
-
-    lines.append("0. Back")
-    return "\n".join(lines)
-
-
-# =========================
-# CALLBACK REQUEST (future)
-# =========================
-
-def create_callback_request(session_id: str, customer_phone: str, target_phone: str, target_kind: str, village: str) -> None:
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-    INSERT INTO callback_requests (session_id, customer_phone, target_phone, target_kind, village, status, created_at)
-    VALUES (?, ?, ?, ?, ?, 'NEW', datetime('now'))
-    """, (session_id, normalize_phone(customer_phone), normalize_phone(target_phone), target_kind, village))
-    conn.commit()
-    conn.close()
-
-
-# =========================
-# FLOWS
-# =========================
-
-def get_customer_context(phone: str):
+def award_points(phone: str, pts: int, reason: str, meta: str = "") -> None:
     """
-    Return (village, landmark).
-
-    New preferred source:
-      - onboarding.user_prefs (role/area_type/landmark) in /opt/angelopp/data/bumala.db
-
-    Old fallback (legacy tables):
-      - kept only if it works; never crash.
+    OUTIXs awarding (robust):
+    - Writes an immutable event to points_ledger
+    - Maintains running balance in points_balance (one row per phone)
+    - Never crashes USSD
     """
-    # 1) Preferred: onboarding prefs (new flow)
     try:
-        prefs = onboarding.get_prefs(phone)
-        if prefs and prefs.get("landmark"):
-            area = (prefs.get("area_type") or "village").strip().lower()
-            # Keep legacy code expecting 'village' to be a village name
-            village = "Bumala" if area == "village" else area.title()
-            return village, prefs["landmark"]
-    except Exception:
-        pass
-
-    # 2) Fallback: legacy logic (if present in DB) — but NEVER crash
-    try:
-        # If your codebase defines a db/connect helper, try to use it.
-        if "get_db" in globals():
-            conn = get_db()
-        elif "db" in globals():
-            conn = db()
-        else:
-            # Last resort: sqlite3 connect to the same DB path onboarding uses
-            import sqlite3
-            conn = sqlite3.connect(str(onboarding.DB_PATH))
+        conn = db()
         cur = conn.cursor()
 
-        # Try common legacy tables/columns without assuming exact schema
-        # First attempt: customer_locations(phone, village, landmark)
-        try:
-            cur.execute("SELECT village, landmark FROM customer_locations WHERE phone=? ORDER BY id DESC LIMIT 1", (phone,))
-            row = cur.fetchone()
-            if row and row[0] and row[1]:
-                return row[0], row[1]
-        except Exception:
-            pass
+        # Ensure balance table exists (single row per phone)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS points_balance (
+                phone TEXT PRIMARY KEY,
+                balance INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
 
-        # Second attempt: landmarks(phone, village, name) or landmarks(added_by, village, name)
-        try:
-            cols = [r[1] for r in cur.execute("PRAGMA table_info(landmarks)").fetchall()]
-            if "phone" in cols:
-                cur.execute("SELECT village, name FROM landmarks WHERE phone=? ORDER BY id DESC LIMIT 1", (phone,))
-                row = cur.fetchone()
-                if row and row[0] and row[1]:
-                    return row[0], row[1]
-            elif "added_by" in cols:
-                cur.execute("SELECT village, name FROM landmarks WHERE added_by=? ORDER BY id DESC LIMIT 1", (phone,))
-                row = cur.fetchone()
-                if row and row[0] and row[1]:
-                    return row[0], row[1]
-        except Exception:
-            pass
+        pts = int(pts)
 
+        # Ledger: use pts column (canonical) + also fill amount for older queries
+        cur.execute("""
+            INSERT INTO points_ledger(phone, pts, reason, amount, meta)
+            VALUES (?,?,?,?,?)
+        """, (phone, pts, str(reason), pts, str(meta or "")))
+
+        # Balance upsert
+        cur.execute("""
+            INSERT INTO points_balance(phone, balance)
+            VALUES (?,?)
+            ON CONFLICT(phone) DO UPDATE SET
+                balance = balance + excluded.balance,
+                updated_at = datetime('now')
+        """, (phone, pts))
+
+        conn.commit()
     except Exception:
-        pass
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return
 
-    # 3) Safe default
-    return "Bumala", "Church"
+def _add_points(phone: str, pts: int, reason: str, meta: str = "") -> None:
+    return award_points(phone, int(pts), str(reason), str(meta or ""))
+
+
+def _add_points(phone: str, pts: int, reason: str, meta: str = "") -> None:
+    return award_points(phone, int(pts), str(reason), str(meta or ""))
 
 
 def handle_find_rider(parts: List[str], session_id: str, phone: str) -> Tuple[str, int]:
@@ -1672,9 +1553,8 @@ def get_nearest_drivers(phone: str, village: str, landmark: str | None = None, l
 CHANNEL_CATEGORIES = ["Community", "Business", "Sacco", "Education", "Entertainment"]
 
 def _db():
-    # Always use the same DB as onboarding (this VPS uses /opt/angelopp/app/bumala.db)
-    return sqlite3.connect(str(onboarding.DB_PATH))
-
+    # Always use ONE DB file (DB_PATH) for the whole app
+    return sqlite3.connect(DB_PATH)
 def get_my_channel(phone: str):
     conn = _db()
     cur = conn.cursor()
@@ -2065,6 +1945,11 @@ def handle_my_channel(raw: str, phone: str) -> str:
                     (int(cid), str(ccat or ""), str(phone or ""), str(msg))
                 )
                 conn.commit()
+                # OUTIXs: reward publishing useful info (fail-safe)
+                try:
+                    award_points(phone, 1, reason="POST_MESSAGE", meta="channel")
+                except Exception:
+                    pass
                 return "CON Posted ✓\n0. Back"
             except Exception:
                 return "CON Could not post now.\n0. Back"
