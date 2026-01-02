@@ -657,6 +657,18 @@ def normalize_phone(phone: str) -> str:
     return "+" + d
 
 
+
+def community_group_label(phone: str) -> str:
+    """Return the community-group label based on phone country code.
+    Kenya: Sacco
+    Sierra Leone: Osusu
+    """
+    ph = (phone or "").strip()
+    # Sierra Leone country code is +232
+    if ph.startswith("+232") or ph.startswith("232"):
+        return "Osusu"
+    return "Sacco"
+
 def parse_text(text: str) -> List[str]:
     if not text:
         return []
@@ -1715,29 +1727,32 @@ def handle_sacco_updates(raw: str, phone: str):
     raw = (raw or "").strip()
     parts = raw.split("*") if raw else []
 
+    # Dynamic label: Kenya=Sacco, Sierra Leone=Osusu
+    label = community_group_label(phone)
+
     if raw == "5":
         return (
-            "CON Sacco Line\n"
-            "1. Latest Sacco updates\n"
-            "2. Sacco principles & safety\n"
+            "CON " + label + " Line\n"
+            "1. Latest " + label + " updates\n"
+            "2. " + label + " principles & safety\n"
             "3. Verified riders\n"
             "4. Report an issue\n"
-            "5. How Sacco supports the community\n"
+            "5. How " + label + " supports the community\n"
             "0. Back"
         )
 
     if raw == "5*1":
         return (
-            "CON Sacco — latest\n"
+            "CON " + label + " — latest\n"
             "No updates yet.\n\n"
-            "Tip: Sacco leaders can post updates\n"
+            "Tip: " + label + " leaders can post updates\n"
             "via a Sacco channel.\n"
             "0. Back"
         )
 
     if raw == "5*2":
         return (
-            "CON Sacco principles\n"
+            "CON " + label + " principles\n"
             "• Safety first — people before profit\n"
             "• Respect customers & community\n"
             "• Fair pricing, no exploitation\n"
@@ -1754,7 +1769,7 @@ def handle_sacco_updates(raw: str, phone: str):
             "1. " + mask_phone_public("+254700000002") + " (Bumala Sacco)",
             "2. " + mask_phone_public("+254700000005") + " (Market Route)",
             "",
-            "Verified by local Sacco leadership.",
+            "Verified by local " + label + " leadership.",
             "0. Back",
         ]
         return "\n".join(lines)
@@ -1811,7 +1826,7 @@ def handle_sacco_updates(raw: str, phone: str):
     if raw == "5*0":
         return None
 
-    return "CON Sacco Line\nInvalid option.\n0. Back"
+    return "CON " + label + " Line\nInvalid option.\n0. Back"
 
 def handle_sacco_line(raw: str, phone: str) -> str:
     """
