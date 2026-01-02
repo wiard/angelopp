@@ -348,6 +348,34 @@ def ensure_challenge_schema():
     conn.commit()
     conn.close()
 
+
+
+def ensure_messages(conn: sqlite3.Connection) -> None:
+    """
+    Ensure messages table exists with a 'text' column.
+    Safe migrations: if table exists but text missing, add it.
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            category TEXT NOT NULL DEFAULT '',
+            author_phone TEXT NOT NULL DEFAULT '',
+            text TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+    """)
+    cur.execute("PRAGMA table_info(messages);")
+    cols = [r[1] for r in cur.fetchall()]
+    if "text" not in cols:
+        try: cur.execute("ALTER TABLE messages ADD COLUMN text TEXT NOT NULL DEFAULT '';")
+        except Exception: pass
+    if "category" not in cols:
+        try: cur.execute("ALTER TABLE messages ADD COLUMN category TEXT NOT NULL DEFAULT '';")
+        except Exception: pass
+    conn.commit()
+
 def _add_points(phone: str, pts: int, reason: str):
     conn = db()
     cur = conn.cursor()
@@ -1687,54 +1715,58 @@ def post_message(channel_id: int, text: str) -> int:
     conn.close()
     return int(mid)
 
+
 def get_latest_messages(category: str, limit: int = 5):
     """
-    LATEST_MESSAGES_V2
-    Robust fetch: supports message tables where the text column may be named:
-      text / message / body / content
-    Never raises to caller; returns [] on any error.
+    Returns list of tuples: (channel_name, text, created_at)
+    Never throws (callers may still wrap).
     """
     try:
         conn = db()
+        ensure_messages(conn)
         cur = conn.cursor()
 
-        # Detect which column exists on messages table
-        cur.execute("PRAGMA table_info(messages);")
-        cols = [r[1] for r in cur.fetchall()]  # (cid,name,type,notnull,dflt,pk)
-        # pick best available text-like column
-        text_col = None
-        for cand in ("text", "message", "body", "content"):
-            if cand in cols:
-                text_col = cand
-                break
-
-        if not text_col:
-            # table exists but no usable text column
-            return []
-
-        # Build query with the chosen column
-        q = f"""
-        SELECT
-            m.category AS category,
-            m.{text_col} AS text,
-            COALESCE(m.created_at,'') AS created_at
-        FROM messages m
-        WHERE lower(trim(m.category)) = lower(trim(?))
-        ORDER BY COALESCE(m.created_at,'') DESC
-        LIMIT ?
-        """
-        cur.execute(q, (category, int(limit)))
-        rows = cur.fetchall()
-        out = []
-        for r in rows:
-            # r might be Row or tuple
-            try:
-                out.append({"category": r["category"], "text": r["text"], "created_at": r["created_at"]})
-            except Exception:
-                out.append({"category": r[0], "text": r[1], "created_at": r[2] if len(r) > 2 else ""})
-        return out
+        # Try to join with channels if that table exists
+        try:
+            cur.execute("""
+                SELECT c.name AS channel_name,
+                       m.text AS text,
+                       m.created_at AS created_at
+                FROM messages m
+                LEFT JOIN channels c ON c.id = m.channel_id
+                WHERE lower(trim(m.category)) = lower(trim(?))
+                ORDER BY m.id DESC
+                LIMIT ?
+            """, (category, int(limit)))
+            rows = cur.fetchall() or []
+            out = []
+            for r in rows:
+                # sqlite3.Row or tuple
+                chname = (r["channel_name"] if hasattr(r, "__getitem__") else r[0]) or "Channel"
+                text   = (r["text"] if hasattr(r, "__getitem__") else r[1]) or ""
+                ts     = (r["created_at"] if hasattr(r, "__getitem__") else r[2]) if len(r) > 2 else ""
+                out.append((str(chname), str(text), str(ts or "")))
+            return out
+        except Exception:
+            # Fallback: no channels table or join failed
+            cur.execute("""
+                SELECT category, text, created_at
+                FROM messages
+                WHERE lower(trim(category)) = lower(trim(?))
+                ORDER BY id DESC
+                LIMIT ?
+            """, (category, int(limit)))
+            rows = cur.fetchall() or []
+            out = []
+            for r in rows:
+                cat  = (r["category"] if hasattr(r, "__getitem__") else r[0]) or "Category"
+                text = (r["text"] if hasattr(r, "__getitem__") else r[1]) or ""
+                ts   = (r["created_at"] if hasattr(r, "__getitem__") else r[2]) if len(r) > 2 else ""
+                out.append((str(cat), str(text), str(ts or "")))
+            return out
     except Exception:
         return []
+
 def handle_listen_channels(raw: str) -> str:
     parts = (raw or "").split("*")
 
@@ -1832,6 +1864,30 @@ def handle_my_channel(raw: str, phone: str) -> str:
                 if not can_post_today(cid):
                     return "CON Limit reached\nYou can post 1 message/day.\n0. Back"
                 return "CON Post message (max 240 chars):"
+
+
+        # POST_MESSAGE_V1:
+        # 7*1*<text> -> save message to DB (never 500)
+        if len(parts) >= 3 and parts[1] == "1" and ch:
+            msg = "*".join(parts[2:]).strip()
+            if not msg:
+                return "CON Empty message.\n0. Back"
+            if len(msg) > 240:
+                msg = msg[:240]
+
+            try:
+                cid, cname, ccat = ch  # from get_my_channel()
+                conn = db()
+                ensure_messages(conn)
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO messages(channel_id, category, author_phone, text) VALUES (?,?,?,?)",
+                    (int(cid), str(ccat or ""), str(phone or ""), str(msg))
+                )
+                conn.commit()
+                return "CON Posted ✓\n0. Back"
+            except Exception:
+                return "CON Could not post now.\n0. Back"
 
             # 7*1*<text> -> save
             if len(parts) >= 3 and parts[1] == "1":
