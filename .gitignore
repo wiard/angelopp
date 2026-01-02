@@ -44,3 +44,4 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 .githooks/
+app/ussd.py.BROKEN_before_fix_*.py
