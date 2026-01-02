@@ -235,6 +235,14 @@ import re
 # Onboarding gate (role -> area -> landmark)
 import onboarding
 
+
+def mask_phone_public(phone: str) -> str:
+    """Public-safe phone label: never expose real number."""
+    ph = (phone or "").strip()
+    digits = "".join(c for c in ph if c.isdigit())
+    tail = digits[-3:] if len(digits) >= 3 else digits
+    return f"Rider #{tail}" if tail else "Rider"
+
 # ============================================================
 # User prefs (role) - stored per phone
 # ============================================================
@@ -1818,14 +1826,16 @@ def handle_sacco_updates(raw: str, phone: str):
         )
 
     if raw == "5*3":
-        # Placeholder: later you can pull from DB "providers" flagged verified_by_sacco=1
-        return (
-            "CON Verified riders\n"
-            "1. +254700000002 (Bumala Sacco)\n"
-            "2. +254700000005 (Market Route)\n\n"
-            "Verified by local Sacco leadership.\n"
-            "0. Back"
-        )
+        # Verified riders (public): masked labels only
+        lines = [
+            "CON Verified riders",
+            "1. " + mask_phone_public("+254700000002") + " (Bumala Sacco)",
+            "2. " + mask_phone_public("+254700000005") + " (Market Route)",
+            "",
+            "Verified by local Sacco leadership.",
+            "0. Back",
+        ]
+        return "\n".join(lines)
 
     if raw.startswith("5*4"):
         # 5*4 -> prompt, 5*4*<text> -> accept
