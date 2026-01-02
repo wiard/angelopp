@@ -1,4 +1,5 @@
 from flask import Flask, request, send_from_directory, jsonify
+import re
 import sqlite3
 import hashlib
 import os
@@ -9,6 +10,49 @@ print('[USSD] running file:', __file__, flush=True)
 app = Flask(__name__)
 
 DB_PATH = os.environ.get("ANGELOPP_DB", "/opt/angelopp/data/bumala.db")
+
+# -----------------------------
+# Public feed: policy + scrubbing
+# -----------------------------
+_phone_re = re.compile(r'(?:\+?\d[\d\s\-().]{6,}\d)')
+_email_re = re.compile(r'\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b', re.I)
+_url_re   = re.compile(r'\bhttps?://\S+\b', re.I)
+
+def _mask_digits(token: str) -> str:
+    digits = re.sub(r'\D', '', token or '')
+    if len(digits) < 7:
+        return token
+    return '•' * max(0, len(digits)-2) + digits[-2:]
+
+def scrub_public_text(text: str) -> str:
+    """Mask accidental PII in public pages (phones/emails/urls/long IDs)."""
+    t = (text or '')
+    t = _email_re.sub('[email-hidden]', t)
+    t = _url_re.sub('[link-hidden]', t)
+    def repl(m):
+        return '[phone-' + _mask_digits(m.group(0)) + ']'
+    t = _phone_re.sub(repl, t)
+    t = re.sub(r'\b\d{10,}\b', lambda m: '[id-' + _mask_digits(m.group(0)) + ']', t)
+    return t
+
+def anon_user(phone: str) -> str:
+    raw = (ANON_SALT + '|' + (phone or '')).encode('utf-8')
+    return 'u_' + hashlib.sha256(raw).hexdigest()[:10]
+
+def is_category_public(category: str) -> bool:
+    cat = (category or '').strip()
+    try:
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute('SELECT is_public FROM public_policy WHERE category=?', (cat,))
+        row = cur.fetchone()
+        con.close()
+        if not row:
+            return False
+        return int(row[0] or 0) == 1
+    except Exception:
+        return False
+
 ANON_SALT = os.environ.get("ANGELOPP_ANON_SALT", "angelopp-public-v1")
 
 def db():
@@ -43,35 +87,50 @@ def public_index():
 
 @app.route("/public/latest")
 def public_latest():
-    # public feed: we read from messages table (already used by channels in your logs)
-    limit = int(request.args.get("limit", "50"))
-    limit = max(1, min(limit, 200))
+    # public feed with policy + scrubbing
+    limit = int(request.args.get('limit', '50') or 50)
+    if limit > 200: limit = 200
+    category = (request.args.get('category', '') or '').strip()
 
-    con = db()
+    con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
-    cur.execute("""
-        SELECT id, category, author_phone, channel_id, text, created_at
-        FROM messages
-        ORDER BY id DESC
-        LIMIT ?
-    """, (limit,))
+
+    params = []
+    where = []
+
+    # Only allow public categories
+    if category:
+        if not is_category_public(category):
+            con.close()
+            return jsonify({'ok': True, 'count': 0, 'items': []})
+        where.append('category=?')
+        params.append(category)
+    else:
+        # default: show only categories marked public
+        where.append('category IN (SELECT category FROM public_policy WHERE is_public=1)')
+
+    q = 'SELECT id, channel_id, category, author_phone, text, created_at FROM messages'
+    if where:
+        q += ' WHERE ' + ' AND '.join(where)
+    q += ' ORDER BY id DESC LIMIT ?'
+    params.append(limit)
+
+    cur.execute(q, params)
     rows = cur.fetchall()
     con.close()
 
-    out = []
-    for r in rows:
-        out.append({
-            "id": r["id"],
-            "category": r["category"],
-            "author": anon_phone(r["author_phone"]),
-            "channel_id": r["channel_id"],
-            "text": r["text"],
-            "created_at": r["created_at"],
+    items = []
+    for (mid, channel_id, cat, author_phone, text, created_at) in rows:
+        items.append({
+            'id': mid,
+            'channel_id': channel_id,
+            'category': cat,
+            'author': anon_user(author_phone),
+            'text': scrub_public_text(text),
+            'created_at': created_at,
         })
 
-    return jsonify({"ok": True, "count": len(out), "items": out})
-
-@app.route("/public/stats")
+    return jsonify({'ok': True, 'count': len(items), 'items': items})
 def public_stats():
     con = db()
     cur = con.cursor()
@@ -103,6 +162,23 @@ def public_stats():
         "by_category": by_category,
         "by_day_last_14": by_day
     })
+
+
+
+# --- PUBLIC FEED ROUTES ---
+# Make /public and /public/ both work and serve /public/index.html
+from flask import send_from_directory, redirect
+
+PUBLIC_DIR = os.path.join(os.path.dirname(__file__), "public")
+
+@app.route("/public")
+def public_root_no_slash():
+    return redirect("/public/", code=302)
+
+@app.route("/public/")
+def public_root():
+    return send_from_directory(PUBLIC_DIR, "index.html")
+
 
 if __name__ == "__main__":
     # Dev server (behind nginx/uwsgi/gunicorn later if needed)
