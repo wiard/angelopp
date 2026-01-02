@@ -105,25 +105,25 @@ def public_index():
 
 @app.route("/public/latest")
 def public_latest():
-    # Default category is Community unless overridden
-    category = (request.args.get("category") or "Community").strip()
+    # Option C: public feed reads ONLY from public_messages (explicitly published)
+    category = (request.args.get("category", "Community") or "Community").strip()
+    try:
+        limit = int(request.args.get("limit", "50") or "50")
+    except Exception:
+        limit = 50
+    limit = max(1, min(200, limit))
 
-    # Only show public categories
     if not is_category_public(category):
-        return jsonify({"ok": True, "count": 0, "items": [], "category": category, "public": False})
-
-    limit = int(request.args.get("limit") or 50)
-    if limit < 1: limit = 1
-    if limit > 200: limit = 200
+        return jsonify({"ok": True, "public": False, "category": category, "count": 0, "items": []})
 
     con = db()
     cur = con.cursor()
     cur.execute("""
-      SELECT id, channel_id, category, author_phone, text, created_at
-      FROM messages
-      WHERE category = ?
-      ORDER BY id DESC
-      LIMIT ?
+        SELECT id, channel_id, category, author_anon, text, created_at, published_at
+        FROM public_messages
+        WHERE category=? AND COALESCE(is_hidden,0)=0
+        ORDER BY id DESC
+        LIMIT ?
     """, (category, limit))
     rows = cur.fetchall()
     con.close()
@@ -131,57 +131,46 @@ def public_latest():
     items = []
     for r in rows:
         items.append({
-            "id": int(r["id"]),
-            "channel_id": int(r["channel_id"]),
+            "id": r["id"],
+            "channel_id": r["channel_id"],
             "category": r["category"],
-            "author": anon_user(str(r["author_phone"] or "")),
-            "text": scrub_public_text(str(r["text"] or "")),
+            "author": r["author_anon"],
+            "text": r["text"],
             "created_at": r["created_at"],
         })
-
-    return jsonify({"ok": True, "category": category, "public": True, "count": len(items), "items": items})
+    return jsonify({"ok": True, "public": True, "category": category, "count": len(items), "items": items})
 
 @app.route("/public/stats")
 def public_stats():
-    # Aggregate only public categories
+    # Stats over public_messages only
     con = db()
     cur = con.cursor()
 
-    cur.execute("SELECT category FROM public_policy WHERE is_public=1")
-    public_cats = [r["category"] for r in cur.fetchall()]
-    if not public_cats:
-        con.close()
-        return jsonify({"ok": True, "total_messages": 0, "by_category": [], "by_day_last_14": []})
+    # total
+    cur.execute("SELECT COUNT(*) AS c FROM public_messages WHERE COALESCE(is_hidden,0)=0")
+    total = int(cur.fetchone()[0] or 0)
 
-    # Total + by_category
-    q_marks = ",".join(["?"] * len(public_cats))
+    # by category
+    cur.execute("""
+        SELECT category, COUNT(*) AS c
+        FROM public_messages
+        WHERE COALESCE(is_hidden,0)=0
+        GROUP BY category
+        ORDER BY c DESC
+    """)
+    by_category = [{"category": r[0], "count": int(r[1] or 0)} for r in cur.fetchall()]
 
-    cur.execute(f"""
-      SELECT category, COUNT(*) AS count
-      FROM messages
-      WHERE category IN ({q_marks})
-      GROUP BY category
-      ORDER BY count DESC
-    """, public_cats)
-    by_category = [{"category": r["category"], "count": int(r["count"])} for r in cur.fetchall()]
-
-    cur.execute(f"""
-      SELECT COUNT(*) AS total
-      FROM messages
-      WHERE category IN ({q_marks})
-    """, public_cats)
-    total = int(cur.fetchone()["total"])
-
-    # Last 14 days by day (sqlite date)
-    cur.execute(f"""
-      SELECT date(created_at) AS day, COUNT(*) AS count
-      FROM messages
-      WHERE category IN ({q_marks})
-        AND created_at >= datetime('now','-14 days')
-      GROUP BY date(created_at)
-      ORDER BY day ASC
-    """, public_cats)
-    by_day = [{"day": r["day"], "count": int(r["count"])} for r in cur.fetchall()]
+    # last 14 days
+    cur.execute("""
+        SELECT substr(published_at,1,10) AS day, COUNT(*) AS c
+        FROM public_messages
+        WHERE COALESCE(is_hidden,0)=0
+        GROUP BY day
+        ORDER BY day DESC
+        LIMIT 14
+    """)
+    rows = cur.fetchall()
+    by_day = [{"day": r[0], "count": int(r[1] or 0)} for r in reversed(rows)]
 
     con.close()
     return jsonify({"ok": True, "total_messages": total, "by_category": by_category, "by_day_last_14": by_day})
