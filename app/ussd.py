@@ -2,6 +2,38 @@ from __future__ import annotations
 # --- Relative distance engine ---
 from relative_distance import PersonLocation, rank_drivers
 
+
+
+# ============================================================
+# Root menu village: read from user_prefs (fallback Church)
+# ============================================================
+
+def get_pref_village(phone: str, fallback: str = "Church") -> str:
+    pnorm = normalize_phone(phone)
+    try:
+        conn = db()
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT village FROM user_prefs WHERE phone=?", (pnorm,))
+        except Exception:
+            return fallback
+        row = cur.fetchone()
+        if not row:
+            return fallback
+        v = row[0] if isinstance(row, (list, tuple)) else row["village"]
+        v = (v or "").strip() or fallback
+        return v
+    except Exception:
+        return fallback
+
+def village_name_from_choice(choice: str):
+    c = str(choice).strip()
+    for k, name in _village_pairs():
+        if c == str(k):
+            return name
+    return None
+
+
 # Toggle demo inputs for fairness ranking
 FAIRNESS_DEMO_MODE = True
 
@@ -137,11 +169,10 @@ from typing import List, Tuple, Optional
 # --- villages (used by businesses menu) ---
 # pick_from_list() expects (key,label) pairs
 VILLAGES = [
-    ("1", "Bumala"),
-    ("2", "Butula"),
-    ("3", "Busia"),
+    ('1', 'Bumala'),
+    ('2', 'Butula'),
+    ('3', 'Busia'),
 ]
-# ------------------------------------------
 
 # === CHALLENGE_SCHEMA_V1 ===
 import re
@@ -152,53 +183,32 @@ import onboarding
 # ============================================================
 # User prefs (role) - stored per phone
 # ============================================================
+
 def ensure_user_prefs(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
-    cur.execute(
-        "CREATE TABLE IF NOT EXISTS user_prefs ("
-        " phone TEXT PRIMARY KEY,"
-        " role  TEXT NOT NULL DEFAULT 'customer',"
-        " updated_at TEXT NOT NULL DEFAULT (datetime('now'))"
-        ");"
-    )
-    conn.commit()
-
-def get_user_role(phone: str) -> str:
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_prefs (
+        phone TEXT PRIMARY KEY,
+        role TEXT NOT NULL DEFAULT 'customer',
+        village TEXT NOT NULL DEFAULT 'Church',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    """)
+    # migration: add missing columns safely (older DBs)
     try:
-        conn = db()
-        ensure_user_prefs(conn)
-        cur = conn.cursor()
-        cur.execute("SELECT role FROM user_prefs WHERE phone = ? LIMIT 1;", (phone,))
-        row = cur.fetchone()
-        if row is None:
-            return 'customer'
-        # sqlite Row or tuple
-        try:
-            return (row['role'] or 'customer')
-        except Exception:
-            return (row[0] or 'customer')
+        cur.execute("ALTER TABLE user_prefs ADD COLUMN village TEXT NOT NULL DEFAULT 'Church';")
     except Exception:
-        return 'customer'
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def set_user_role(phone: str, role: str) -> None:
-    role = (role or 'customer').strip().lower()
-    if role not in ('customer', 'provider'):
-        role = 'customer'
-    conn = db()
-    ensure_user_prefs(conn)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO user_prefs(phone, role, updated_at) VALUES (?, ?, datetime('now')) "
-        "ON CONFLICT(phone) DO UPDATE SET role=excluded.role, updated_at=datetime('now');",
-        (phone, role),
-    )
+        pass
+    try:
+        cur.execute("ALTER TABLE user_prefs ADD COLUMN created_at TEXT NOT NULL DEFAULT (datetime('now'));")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE user_prefs ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'));")
+    except Exception:
+        pass
     conn.commit()
-    conn.close()
 
 def provider_home_menu() -> str:
     lines = [
@@ -544,7 +554,8 @@ def pick_from_list(title: str, items: List[Tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def main_menu() -> str:
+def main_menu(phone: str = "") -> str:
+    v = get_pref_village(phone, fallback="Church") if phone else "Church"
     return "\n".join([
         "CON Bumala Directory",
         f"1. Find a Rider {ICON_GO}",
@@ -557,9 +568,7 @@ def main_menu() -> str:
 
 
 def village_menu(title: str = "Choose village:") -> str:
-    return pick_from_list(title, VILLAGES)
-
-
+    return pick_from_list(title, _village_pairs())
 def category_menu(title: str = "Choose category:") -> str:
     return pick_from_list(title, BUSINESS_CATEGORIES)
 
@@ -1378,6 +1387,86 @@ def handle_ussd_core(session_id: str, phone_number: str, text: str) -> Tuple[str
 
     phone = normalize_phone(phone_number)
     parts = parse_text(text)
+
+    # CHANGE_PLACE_ROUTER_V3 (override buggy older place logic)
+    if parts and parts[0] == "4":
+        return handle_change_place_v3(parts, phone)
+
+    # --- CHANGE_PLACE_VILLAGE_PICK_V2: handle 4*1*<village> ---
+    if parts and parts[0] == "4" and len(parts) >= 2 and parts[1] == "1":
+        # 4*1 -> show village list (existing)
+        if len(parts) == 3:
+            choice = parts[2]
+            villages = {"1": "Bumala", "2": "Butula", "3": "Busia"}
+            v = villages.get(choice)
+            if not v:
+                return ussd_response("CON Invalid village.\n0. Back"), 200
+        # Minimal working: confirm (later you can persist into user prefs)
+        # PERSIST_VILLAGE_V1: store village in user prefs
+        try:
+            conn = db()
+            cur = conn.cursor()
+            # ensure prefs row exists
+            ensure_user_prefs(conn)
+            cur.execute("UPDATE user_prefs SET village=? WHERE phone=?", (v, phone))
+            conn.commit()
+        except Exception:
+            pass
+            return ussd_response(f"CON Location set ✓\nVillage: {v}\n0. Back"), 200
+    # --- END CHANGE_PLACE_VILLAGE_PICK_V2 ---
+
+    # --- CHANGE_PLACE_ROUTER_V2: ensure 'Change my place' has priority (fixes 4*1 accidentally triggering challenge) ---
+    if parts and parts[0] == "4":
+        if len(parts) == 1:
+            return ussd_response(
+                "CON Choose your area:\n"
+                "1. Village\n"
+                "2. Town/City\n"
+                "3. Airport\n"
+                "0. Back"
+            ), 200
+
+        if len(parts) >= 2 and parts[1] == "0":
+            return ussd_response(root_menu(phone)), 200
+
+        # 4*1 -> Village selector (uses village_menu() if you have it)
+        if parts[1] == "1":
+            try:
+                return ussd_response(village_menu()), 200
+            except Exception:
+                return ussd_response(
+                    "CON Choose your village:\n"
+                    "1. Bumala\n"
+                    "2. Butula\n"
+                    "3. Busia\n"
+                    "0. Back"
+                ), 200
+
+        if parts[1] == "2":
+            return ussd_response("CON Town/City (soon)\n0. Back"), 200
+
+        if parts[1] == "3":
+            return ussd_response("CON Airport (soon)\n0. Back"), 200
+
+        return ussd_response("CON Invalid option.\n0. Back"), 200
+    # --- END CHANGE_PLACE_ROUTER_V2 ---
+    # --- BUSINESSES_V2_ROUTER_V1 (robust) ---
+    if parts and parts[0] == "2":
+        return handle_businesses_v2(parts, session_id, phone), 200
+    # --- END BUSINESSES_V2_ROUTER_V1 ---
+
+    # --- BUSINESSES_VILLAGE_INTERCEPT_V1 ---
+    # When user selects Local Businesses -> village (2*1 etc),
+    # map numeric choice to a village name string early to avoid crashes.
+    if parts and parts[0] == "2" and len(parts) >= 2:
+        if parts[1] == "0":
+            return ussd_response(root_menu(phone)), 200
+        _vn = village_name_from_choice(parts[1])
+        if _vn:
+            parts[1] = _vn
+    # --- END BUSINESSES_VILLAGE_INTERCEPT_V1 ---
+
+
     # --- TRAVEL (customer submenu) ---
     if parts and parts[0] == '8':
         return handle_travel(parts, session_id, phone)
@@ -1419,7 +1508,7 @@ def handle_ussd_core(session_id: str, phone_number: str, text: str) -> Tuple[str
 
     # empty -> show main menu
     if not parts:
-        return ussd_response(main_menu()), 200
+        return ussd_response(root_menu(phone)), 200
 
     # Global "0" behavior:
     # - if user sends "0" at root: exit
@@ -1435,7 +1524,7 @@ def handle_ussd_core(session_id: str, phone_number: str, text: str) -> Tuple[str
         root = "4"
 
     if root == "":
-        return ussd_response(main_menu()), 200
+        return ussd_response(root_menu(phone)), 200
 
     if root == "1":
         return handle_find_rider(parts, session_id, phone)
@@ -1455,7 +1544,7 @@ def handle_ussd_core(session_id: str, phone_number: str, text: str) -> Tuple[str
 
         return "END Bye.", 200
 
-    return ussd_response(main_menu() + "\n\nInvalid option."), 200
+    return ussd_response(main_menu(phone) + "\n\nInvalid option."), 200
 
 # =========================================================
 # Relative distance integration
@@ -1544,22 +1633,53 @@ def post_message(channel_id: int, text: str) -> int:
     return int(mid)
 
 def get_latest_messages(category: str, limit: int = 5):
-    if category not in CHANNEL_CATEGORIES:
-        category = "Community"
-    conn = _db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT c.name, m.text, m.created_at
-        FROM channel_messages m
-        JOIN channels c ON c.id=m.channel_id
-        WHERE c.is_active=1 AND c.category=?
-        ORDER BY m.id DESC
-        LIMIT ?
-    """, (category, int(limit)))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+    """
+    LATEST_MESSAGES_V2
+    Robust fetch: supports message tables where the text column may be named:
+      text / message / body / content
+    Never raises to caller; returns [] on any error.
+    """
+    try:
+        conn = db()
+        cur = conn.cursor()
 
+        # Detect which column exists on messages table
+        cur.execute("PRAGMA table_info(messages);")
+        cols = [r[1] for r in cur.fetchall()]  # (cid,name,type,notnull,dflt,pk)
+        # pick best available text-like column
+        text_col = None
+        for cand in ("text", "message", "body", "content"):
+            if cand in cols:
+                text_col = cand
+                break
+
+        if not text_col:
+            # table exists but no usable text column
+            return []
+
+        # Build query with the chosen column
+        q = f"""
+        SELECT
+            m.category AS category,
+            m.{text_col} AS text,
+            COALESCE(m.created_at,'') AS created_at
+        FROM messages m
+        WHERE lower(trim(m.category)) = lower(trim(?))
+        ORDER BY COALESCE(m.created_at,'') DESC
+        LIMIT ?
+        """
+        cur.execute(q, (category, int(limit)))
+        rows = cur.fetchall()
+        out = []
+        for r in rows:
+            # r might be Row or tuple
+            try:
+                out.append({"category": r["category"], "text": r["text"], "created_at": r["created_at"]})
+            except Exception:
+                out.append({"category": r[0], "text": r[1], "created_at": r[2] if len(r) > 2 else ""})
+        return out
+    except Exception:
+        return []
 def handle_listen_channels(raw: str) -> str:
     parts = (raw or "").split("*")
 
@@ -1580,7 +1700,13 @@ def handle_listen_channels(raw: str) -> str:
             idx = int(choice) - 1
             if 0 <= idx < len(CHANNEL_CATEGORIES):
                 cat = CHANNEL_CATEGORIES[idx]
-                rows = get_latest_messages(cat, limit=5)
+                # LISTEN_SAFE_V2: guard DB access so USSD never 500s
+                try:
+                    _rows = get_latest_messages(cat, limit=5)
+                except Exception:
+                    _rows = []
+                rows = _rows
+    # rows already set by LISTEN_SAFE_V2
                 lines = [f"{cat} — latest"]
                 if not rows:
                     lines.append("No messages yet.")
@@ -1724,7 +1850,7 @@ def handle_ussd(session_id: str, phone_number: str, text: str):
 4. Change my place
 6. Listen (channels)
 7. My channel
-    8. Travel ->
+8. Travel ->
 9. Switch role
 0. Exit"""
         return ("CON " + menu, 200)
@@ -1850,3 +1976,154 @@ def handle_travel(parts, session_id: str, phone: str):
     return _resp("Invalid option.\n0. Back")
 
 
+
+
+# ============================================================
+# Businesses (robust v2) - avoids 500s, uses providers table if present
+# ============================================================
+
+
+# ============================================================
+# Change place V3 (safe) — persists user_prefs.village
+# ============================================================
+def handle_change_place_v3(parts, phone: str):
+    # parts[0] == "4"
+    if parts == ["4"]:
+        return ussd_response(
+            "CON Choose your area:\n"
+            "1. Village\n"
+            "2. Town/City\n"
+            "3. Airport\n"
+            "0. Back"
+        ), 200
+
+    if len(parts) >= 2 and parts[1] == "1":
+        # Village flow
+        if len(parts) == 2:
+            return ussd_response(
+                "CON Choose your village:\n"
+                "1. Bumala\n"
+                "2. Butula\n"
+                "3. Busia\n"
+                "0. Back"
+            ), 200
+
+        # Pick village
+        choice = parts[2]
+        if choice == "0":
+            return ussd_response(main_menu()), 200
+
+        # Map choice -> name
+        v = None
+        try:
+            v = village_name_from_choice(choice)
+        except Exception:
+            pass
+        if not v:
+            # fallback hard-map
+            v = {"1": "Bumala", "2": "Butula", "3": "Busia"}.get(choice)
+
+        if not v:
+            return ussd_response("CON Invalid option.\n0. Back"), 200
+
+        # Persist
+        try:
+            conn = db()
+            ensure_user_prefs(conn)
+            cur = conn.cursor()
+            # Upsert (SQLite)
+            cur.execute("""
+                INSERT INTO user_prefs (phone, village, updated_at)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(phone) DO UPDATE SET
+                    village=excluded.village,
+                    updated_at=datetime('now')
+            """, (normalize_phone(phone), v))
+            conn.commit()
+        except Exception:
+            # never break flow
+            pass
+
+        return ussd_response(f"CON Location set ✓\nVillage: {v}\n0. Back"), 200
+
+    if len(parts) >= 2 and parts[1] == "2":
+        return ussd_response("CON Town/City (soon)\n0. Back"), 200
+
+    if len(parts) >= 2 and parts[1] == "3":
+        return ussd_response("CON Airport (soon)\n0. Back"), 200
+
+    if len(parts) >= 2 and parts[1] == "0":
+        return ussd_response(main_menu()), 200
+
+    return ussd_response("CON Invalid option.\n0. Back"), 200
+def handle_businesses_v2(parts, session_id: str, phone: str):
+    # parts[0] == "2"
+    # 2           -> choose village
+    # 2*<k>       -> list businesses in that village
+    # 2*<k>*<n>   -> show selected business (placeholder)
+    if len(parts) == 1:
+        return ussd_response(village_menu("Businesses in which village?")), 200
+
+    if parts[1] == "0":
+        return ussd_response(main_menu()), 200
+
+    village = village_name_from_choice(parts[1]) or parts[1]
+
+    # fetch businesses from DB if the schema exists
+    items = []
+    try:
+        conn = db()
+        cur = conn.cursor()
+        # providers(phone, provider_type, name, village, current_landmark, is_available, ...)
+        cur.execute("""
+            SELECT name, phone, COALESCE(current_landmark,'') AS lm
+            FROM providers
+            WHERE provider_type='business'
+              AND village=?
+            ORDER BY name ASC
+            LIMIT 9
+        """, (village,))
+        rows = cur.fetchall()
+        for name, ph, lm in rows:
+            items.append((str(name or "Business"), str(ph or ""), str(lm or "")))
+    except Exception:
+        items = []
+
+    if len(parts) == 2:
+        lines = [f"CON Businesses in {village}"]
+        if not items:
+            lines.append("No businesses yet.")
+            lines.append("0. Back")
+            return ussd_response("\n".join(lines)), 200
+
+        for i,(name, ph, lm) in enumerate(items, 1):
+            extra = f" ({lm})" if lm else ""
+            lines.append(f"{i}. {name}{extra} ->")
+        lines.append("0. Back")
+        return ussd_response("\n".join(lines)), 200
+
+    # details / placeholder
+    if len(parts) >= 3:
+        if parts[2] == "0":
+            return ussd_response(village_menu("Businesses in which village?")), 200
+
+        try:
+            idx = int(parts[2])
+        except Exception:
+            return ussd_response("CON Invalid option.\n0. Back"), 200
+
+        if idx < 1 or idx > len(items):
+            return ussd_response("CON Invalid option.\n0. Back"), 200
+
+        name, ph, lm = items[idx-1]
+        lines = [
+            "CON Business",
+            f"Name: {name}",
+            f"Phone: {ph}",
+        ]
+        if lm:
+            lines.append(f"Place: {lm}")
+        lines.append("0. Back")
+        return ussd_response("\n".join(lines)), 200
+
+    return ussd_response("CON Invalid option.\n0. Back"), 200
