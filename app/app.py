@@ -88,184 +88,35 @@ def ussd():
     session_id = request.form.get("sessionId", "") or ""
     phone_number = request.form.get("phoneNumber", "") or ""
     text = request.form.get("text", "") or ""
-    rv = handle_ussd(session_id=session_id, phone_number=phone_number, text=text)
 
-    # allow (body, code) or just body
-    if isinstance(rv, tuple) and len(rv) == 2:
-        return rv
-    return (rv, 200)
-
-# -----------------------------
-# Public website + JSON endpoints
-# -----------------------------
-@app.route("/public")
-@app.route("/public/")
-def public_index():
-    # Serve static HTML from ./public/index.html
-    return send_from_directory(str(PUBLIC_DIR), "index.html")
-
-@app.route("/public/latest")
-def public_latest():
-    # Option C: public feed reads ONLY from public_messages (explicitly published)
-    category = (request.args.get("category", "Community") or "Community").strip()
     try:
-        limit = int(request.args.get("limit", "50") or "50")
-    except Exception:
-        limit = 50
-    limit = max(1, min(200, limit))
+        rv = handle_ussd(session_id=session_id, phone_number=phone_number, text=text)
 
-    if not is_category_public(category):
-        return jsonify({"ok": True, "public": False, "category": category, "count": 0, "items": []})
+        if rv is None:
+            return ("END System error. Please try again.", 200)
 
-    con = db()
-    cur = con.cursor()
-    cur.execute("""
-        SELECT id, channel_id, category, author_anon, text, created_at, published_at
-        FROM public_messages
-        WHERE category=? AND COALESCE(is_hidden,0)=0
-        ORDER BY id DESC
-        LIMIT ?
-    """, (category, limit))
-    rows = cur.fetchall()
-    con.close()
+        # Allow either:
+        #  - string body
+        #  - (body, status_code)
+        #  - ((body, status_code), status_code)  (accidental nesting)
+        if isinstance(rv, tuple) and len(rv) == 2 and isinstance(rv[0], tuple) and len(rv[0]) == 2:
+            rv = rv[0]
 
-    items = []
-    for r in rows:
-        items.append({
-            "id": r["id"],
-            "channel_id": r["channel_id"],
-            "category": r["category"],
-            "author": r["author_anon"],
-            "text": r["text"],
-            "created_at": r["created_at"],
-        })
-    return jsonify({"ok": True, "public": True, "category": category, "count": len(items), "items": items})
+        if isinstance(rv, tuple) and len(rv) == 2:
+            body, code = rv
+            return (str(body), int(code))
 
-@app.route("/public/stats")
-def public_stats():
-    # Stats over public_messages only
-    con = db()
-    cur = con.cursor()
+        # default: assume body-only
+        return (str(rv), 200)
 
-    # total
-    cur.execute("SELECT COUNT(*) AS c FROM public_messages WHERE COALESCE(is_hidden,0)=0")
-    total = int(cur.fetchone()[0] or 0)
+    except Exception as e:
+        # Never crash the USSD gateway: return a safe END message
+        return ("END System error. Please try again.", 200)
 
-    # by category
-    cur.execute("""
-        SELECT category, COUNT(*) AS c
-        FROM public_messages
-        WHERE COALESCE(is_hidden,0)=0
-        GROUP BY category
-        ORDER BY c DESC
-    """)
-    by_category = [{"category": r[0], "count": int(r[1] or 0)} for r in cur.fetchall()]
-
-    # last 14 days
-    cur.execute("""
-        SELECT substr(published_at,1,10) AS day, COUNT(*) AS c
-        FROM public_messages
-        WHERE COALESCE(is_hidden,0)=0
-        GROUP BY day
-        ORDER BY day DESC
-        LIMIT 14
-    """)
-    rows = cur.fetchall()
-    by_day = [{"day": r[0], "count": int(r[1] or 0)} for r in reversed(rows)]
-
-    con.close()
-    return jsonify({"ok": True, "total_messages": total, "by_category": by_category, "by_day_last_14": by_day})
-
-
-@app.route("/public/digest")
-def public_digest():
-    """
-    Small 'headlines' digest for SMS/USSD:
-    - totals per category (public + visible)
-    - last N items text-only, scrubbed already in public_messages
-    """
-    limit = int(request.args.get("limit","10") or 10)
-    limit = max(1, min(50, limit))
-    con = db()
-    cur = con.cursor()
-
-    # categories that are public in policy
-    cur.execute("SELECT category FROM public_policy WHERE is_public=1")
-    cats = [r[0] for r in cur.fetchall()]
-
-    # counts from public_messages (only not hidden + not expired unless pinned)
-    cur.execute("""
-      SELECT category, COUNT(*) AS c
-      FROM public_messages
-      WHERE is_hidden=0
-        AND (COALESCE(is_pinned,0)=1 OR expires_at IS NULL OR expires_at >= datetime('now'))
-      GROUP BY category
-      ORDER BY c DESC
-    """)
-    by_cat = [{"category": r[0], "count": int(r[1] or 0)} for r in cur.fetchall()]
-
-    # latest items (across categories) — text only
-    cur.execute("""
-      SELECT id, category, channel_id, author_anon, text, created_at
-      FROM public_messages
-      WHERE is_hidden=0
-        AND media_type='text'
-        AND (COALESCE(is_pinned,0)=1 OR expires_at IS NULL OR expires_at >= datetime('now'))
-      ORDER BY id DESC
-      LIMIT ?
-    """, (limit,))
-    items = []
-    for r in cur.fetchall():
-        items.append({
-            "id": r[0],
-            "category": r[1],
-            "channel_id": r[2],
-            "author": r[3],
-            "text": r[4],
-            "created_at": r[5],
-        })
-
-    con.close()
-    return jsonify({"ok": True, "limit": limit, "policy_public_categories": cats, "by_category": by_cat, "items": items})
-
-
-@app.route("/public/voice/latest")
-def public_voice_latest():
-    """
-    Future-proof: list latest VOICE items (public, not expired, not hidden).
-    For now, it may be empty until you start publishing voice with media_type='voice'.
-    """
-    limit = int(request.args.get("limit","10") or 10)
-    limit = max(1, min(50, limit))
-    con = db()
-    cur = con.cursor()
-    cur.execute("""
-      SELECT id, category, channel_id, author_anon, text, media_ref, created_at, expires_at, is_pinned
-      FROM public_messages
-      WHERE is_hidden=0
-        AND media_type='voice'
-        AND (COALESCE(is_pinned,0)=1 OR expires_at IS NULL OR expires_at >= datetime('now'))
-      ORDER BY id DESC
-      LIMIT ?
-    """, (limit,))
-    items = []
-    for r in cur.fetchall():
-        items.append({
-            "id": r[0],
-            "category": r[1],
-            "channel_id": r[2],
-            "author": r[3],
-            "transcript": r[4],  # text can store transcript/summary
-            "media_ref": r[5],   # url/path later
-            "created_at": r[6],
-            "expires_at": r[7],
-            "pinned": bool(r[8]),
-        })
-    con.close()
-    return jsonify({"ok": True, "limit": limit, "items": items})
-
-
-if __name__ == '__main__':
-    # dev server
+if __name__ == "__main__":
+    # Dev server. In production, run behind nginx with a real WSGI server.
     port = int(os.environ.get("PORT", "5002"))
-    app.run(host="127.0.0.1", port=port)
+    # Ensure DB path is consistent
+    os.environ.setdefault("ANGELOPP_DB", "/opt/angelopp/data/bumala.db")
+    app.run(host="127.0.0.1", port=port, debug=False)
+
