@@ -442,6 +442,46 @@ def db() -> sqlite3.Connection:
     return conn
 
 
+
+
+def get_customer_context(phone: str):
+    """Return (village, landmark) for a customer.
+    Safe fallback if table/rows missing: ('Bumala','Church') or stored defaults.
+    """
+    try:
+        conn = db()
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        # Try a few known table patterns (your project evolved over time)
+        # 1) user_prefs (village/landmark)
+        try:
+            cur.execute("SELECT village, landmark FROM user_prefs WHERE phone=? ORDER BY updated_at DESC LIMIT 1", (phone,))
+            row = cur.fetchone()
+            if row:
+                v = (row["village"] if "village" in row.keys() else row[0]) or ""
+                l = (row["landmark"] if "landmark" in row.keys() else row[1]) or ""
+                if v or l:
+                    return (v or "Bumala", l or "Church")
+        except Exception:
+            pass
+
+        # 2) customers table
+        try:
+            cur.execute("SELECT village, current_landmark FROM customers WHERE phone=? LIMIT 1", (phone,))
+            row = cur.fetchone()
+            if row:
+                v = (row["village"] if hasattr(row,"keys") and "village" in row.keys() else row[0]) or ""
+                l = (row["current_landmark"] if hasattr(row,"keys") and "current_landmark" in row.keys() else row[1]) or ""
+                if v or l:
+                    return (v or "Bumala", l or "Church")
+        except Exception:
+            pass
+
+    except Exception:
+        pass
+
+    return ("Bumala", "Church")
 def ensure_schema() -> None:
     conn = db()
     cur = conn.cursor()
@@ -823,8 +863,10 @@ def _add_points(phone: str, pts: int, reason: str, meta: str = "") -> None:
 
 def handle_find_rider(parts: List[str], session_id: str, phone: str) -> Tuple[str, int]:
     # Use customer's most recent context from DB
-    village, landmark = get_customer_context(phone)
-
+    try:
+        village, landmark = get_customer_context(phone)
+    except Exception:
+        village, landmark = ("Bumala","Church")
     # If we still don't know where the customer is, ask them to set it
     if not village and not landmark:
         return ussd_response(
