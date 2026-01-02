@@ -1,15 +1,21 @@
 from flask import Flask, request, send_from_directory, jsonify
-import re
 import sqlite3
 import hashlib
 import os
+import re
+from pathlib import Path
 
 from ussd import handle_ussd, normalize_phone
 
 print('[USSD] running file:', __file__, flush=True)
+
+APP_DIR = Path(__file__).resolve().parent
+PUBLIC_DIR = APP_DIR / "public"
+
 app = Flask(__name__)
 
 DB_PATH = os.environ.get("ANGELOPP_DB", "/opt/angelopp/data/bumala.db")
+ANON_SALT = os.environ.get("ANGELOPP_ANON_SALT", "angelopp-public-v1")
 
 # -----------------------------
 # Public feed: policy + scrubbing
@@ -29,9 +35,12 @@ def scrub_public_text(text: str) -> str:
     t = (text or '')
     t = _email_re.sub('[email-hidden]', t)
     t = _url_re.sub('[link-hidden]', t)
+
     def repl(m):
         return '[phone-' + _mask_digits(m.group(0)) + ']'
+
     t = _phone_re.sub(repl, t)
+    # long digit blobs
     t = re.sub(r'\b\d{10,}\b', lambda m: '[id-' + _mask_digits(m.group(0)) + ']', t)
     return t
 
@@ -39,32 +48,40 @@ def anon_user(phone: str) -> str:
     raw = (ANON_SALT + '|' + (phone or '')).encode('utf-8')
     return 'u_' + hashlib.sha256(raw).hexdigest()[:10]
 
-def is_category_public(category: str) -> bool:
-    cat = (category or '').strip()
-    try:
-        con = sqlite3.connect(DB_PATH)
-        cur = con.cursor()
-        cur.execute('SELECT is_public FROM public_policy WHERE category=?', (cat,))
-        row = cur.fetchone()
-        con.close()
-        if not row:
-            return False
-        return int(row[0] or 0) == 1
-    except Exception:
-        return False
-
-ANON_SALT = os.environ.get("ANGELOPP_ANON_SALT", "angelopp-public-v1")
-
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
-def anon_phone(phone: str) -> str:
-    ph = normalize_phone(phone or "")
-    h = hashlib.sha256((ANON_SALT + "|" + ph).encode("utf-8")).hexdigest()
-    return "u_" + h[:10]  # korte stabiele pseudoniem
+def ensure_public_policy():
+    con = db()
+    cur = con.cursor()
+    cur.execute("""
+      CREATE TABLE IF NOT EXISTS public_policy (
+        category TEXT PRIMARY KEY,
+        is_public INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    """)
+    # Default: Community public
+    cur.execute("INSERT OR IGNORE INTO public_policy(category,is_public) VALUES('Community',1)")
+    con.commit()
+    con.close()
 
+def is_category_public(category: str) -> bool:
+    cat = (category or '').strip()
+    con = db()
+    cur = con.cursor()
+    cur.execute("SELECT is_public FROM public_policy WHERE category=?", (cat,))
+    row = cur.fetchone()
+    con.close()
+    return bool(row) and int(row["is_public"] or 0) == 1
+
+ensure_public_policy()
+
+# -----------------------------
+# Core USSD endpoint
+# -----------------------------
 @app.route("/ussd", methods=["POST"])
 def ussd():
     session_id = request.form.get("sessionId", "") or ""
@@ -72,114 +89,104 @@ def ussd():
     text = request.form.get("text", "") or ""
     rv = handle_ussd(session_id=session_id, phone_number=phone_number, text=text)
 
-    # Flatten accidental nested tuples: ((body, code), code)
-    if isinstance(rv, tuple) and len(rv) == 2 and isinstance(rv[0], tuple) and len(rv[0]) == 2:
-        rv = rv[0]
+    # allow (body, code) or just body
     if isinstance(rv, tuple) and len(rv) == 2:
         return rv
-    return (str(rv), 200)
+    return (rv, 200)
 
-# ---------- Public transparency endpoints ----------
+# -----------------------------
+# Public website + JSON endpoints
+# -----------------------------
 @app.route("/public")
+@app.route("/public/")
 def public_index():
-    # static site in /opt/angelopp/app/public/index.html
-    return send_from_directory("public", "index.html")
+    # Serve static HTML from ./public/index.html
+    return send_from_directory(str(PUBLIC_DIR), "index.html")
 
 @app.route("/public/latest")
 def public_latest():
-    # public feed with policy + scrubbing
-    limit = int(request.args.get('limit', '50') or 50)
+    # Default category is Community unless overridden
+    category = (request.args.get("category") or "Community").strip()
+
+    # Only show public categories
+    if not is_category_public(category):
+        return jsonify({"ok": True, "count": 0, "items": [], "category": category, "public": False})
+
+    limit = int(request.args.get("limit") or 50)
+    if limit < 1: limit = 1
     if limit > 200: limit = 200
-    category = (request.args.get('category', '') or '').strip()
 
-    con = sqlite3.connect(DB_PATH)
+    con = db()
     cur = con.cursor()
-
-    params = []
-    where = []
-
-    # Only allow public categories
-    if category:
-        if not is_category_public(category):
-            con.close()
-            return jsonify({'ok': True, 'count': 0, 'items': []})
-        where.append('category=?')
-        params.append(category)
-    else:
-        # default: show only categories marked public
-        where.append('category IN (SELECT category FROM public_policy WHERE is_public=1)')
-
-    q = 'SELECT id, channel_id, category, author_phone, text, created_at FROM messages'
-    if where:
-        q += ' WHERE ' + ' AND '.join(where)
-    q += ' ORDER BY id DESC LIMIT ?'
-    params.append(limit)
-
-    cur.execute(q, params)
+    cur.execute("""
+      SELECT id, channel_id, category, author_phone, text, created_at
+      FROM messages
+      WHERE category = ?
+      ORDER BY id DESC
+      LIMIT ?
+    """, (category, limit))
     rows = cur.fetchall()
     con.close()
 
     items = []
-    for (mid, channel_id, cat, author_phone, text, created_at) in rows:
+    for r in rows:
         items.append({
-            'id': mid,
-            'channel_id': channel_id,
-            'category': cat,
-            'author': anon_user(author_phone),
-            'text': scrub_public_text(text),
-            'created_at': created_at,
+            "id": int(r["id"]),
+            "channel_id": int(r["channel_id"]),
+            "category": r["category"],
+            "author": anon_user(str(r["author_phone"] or "")),
+            "text": scrub_public_text(str(r["text"] or "")),
+            "created_at": r["created_at"],
         })
 
-    return jsonify({'ok': True, 'count': len(items), 'items': items})
+    return jsonify({"ok": True, "category": category, "public": True, "count": len(items), "items": items})
+
+@app.route("/public/stats")
 def public_stats():
+    # Aggregate only public categories
     con = db()
     cur = con.cursor()
 
-    cur.execute("SELECT COUNT(*) AS n FROM messages;")
-    total_messages = cur.fetchone()["n"]
+    cur.execute("SELECT category FROM public_policy WHERE is_public=1")
+    public_cats = [r["category"] for r in cur.fetchall()]
+    if not public_cats:
+        con.close()
+        return jsonify({"ok": True, "total_messages": 0, "by_category": [], "by_day_last_14": []})
 
-    cur.execute("""
-        SELECT category, COUNT(*) AS n
-        FROM messages
-        GROUP BY category
-        ORDER BY n DESC;
-    """)
-    by_category = [{"category": r["category"], "count": r["n"]} for r in cur.fetchall()]
+    # Total + by_category
+    q_marks = ",".join(["?"] * len(public_cats))
 
-    cur.execute("""
-        SELECT date(created_at) AS day, COUNT(*) AS n
-        FROM messages
-        GROUP BY date(created_at)
-        ORDER BY day DESC
-        LIMIT 14;
-    """)
-    by_day = [{"day": r["day"], "count": r["n"]} for r in cur.fetchall()]
+    cur.execute(f"""
+      SELECT category, COUNT(*) AS count
+      FROM messages
+      WHERE category IN ({q_marks})
+      GROUP BY category
+      ORDER BY count DESC
+    """, public_cats)
+    by_category = [{"category": r["category"], "count": int(r["count"])} for r in cur.fetchall()]
+
+    cur.execute(f"""
+      SELECT COUNT(*) AS total
+      FROM messages
+      WHERE category IN ({q_marks})
+    """, public_cats)
+    total = int(cur.fetchone()["total"])
+
+    # Last 14 days by day (sqlite date)
+    cur.execute(f"""
+      SELECT date(created_at) AS day, COUNT(*) AS count
+      FROM messages
+      WHERE category IN ({q_marks})
+        AND created_at >= datetime('now','-14 days')
+      GROUP BY date(created_at)
+      ORDER BY day ASC
+    """, public_cats)
+    by_day = [{"day": r["day"], "count": int(r["count"])} for r in cur.fetchall()]
 
     con.close()
-    return jsonify({
-        "ok": True,
-        "total_messages": total_messages,
-        "by_category": by_category,
-        "by_day_last_14": by_day
-    })
-
-
-
-# --- PUBLIC FEED ROUTES ---
-# Make /public and /public/ both work and serve /public/index.html
-from flask import send_from_directory, redirect
-
-PUBLIC_DIR = os.path.join(os.path.dirname(__file__), "public")
-
-@app.route("/public")
-def public_root_no_slash():
-    return redirect("/public/", code=302)
-
-@app.route("/public/")
-def public_root():
-    return send_from_directory(PUBLIC_DIR, "index.html")
-
+    return jsonify({"ok": True, "total_messages": total, "by_category": by_category, "by_day_last_14": by_day})
 
 if __name__ == "__main__":
-    # Dev server (behind nginx/uwsgi/gunicorn later if needed)
-    app.run(host="127.0.0.1", port=5002)
+    # dev server
+    port = int(os.environ.get("PORT", "5002"))
+    app.run(host="127.0.0.1", port=port)
