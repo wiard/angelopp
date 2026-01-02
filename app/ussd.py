@@ -1770,31 +1770,33 @@ def get_latest_messages(category: str, limit: int = 5):
 
 def handle_sacco_updates(raw: str, phone: str) -> str:
     """
-    Sacco Line: trust + coordination layer.
-    - Show latest Sacco messages (uses existing channel_messages table if present).
-    - Explain how sacco can grow with Angelopp.
-    - Placeholder for verified riders + reporting.
-    Never throws: USSD must not 500.
+    Sacco Line (menu option 5) — must never 500.
     """
     parts = (raw or "").split("*")
 
-    # Root
-    if raw == "5":
+    # 5 -> show menu
+    if raw == "5" or (len(parts) == 1):
         return "\n".join([
             "CON Sacco Line",
             "1. Latest Sacco updates",
-            "2. What Sacco can do here",
+            "2. How Sacco grows with Angelopp",
             "3. Verified riders (soon)",
             "4. Report issue (soon)",
             "0. Back",
         ])
 
-    # Back
-    if len(parts) >= 2 and parts[1] == "0":
+    # safety
+    if len(parts) < 2:
+        return "CON Sacco Line\n0. Back"
+
+    opt = (parts[1] or "").strip()
+
+    # 0 -> caller should handle back-to-root (we keep a clean back screen here)
+    if opt == "0":
         return "CON Back\n0. Back"
 
-    # 5*1 -> latest Sacco updates
-    if len(parts) >= 2 and parts[1] == "1":
+    # 1 -> latest sacco posts (from channel category "Sacco")
+    if opt == "1":
         try:
             rows = get_latest_messages("Sacco", limit=5)
         except Exception:
@@ -1803,29 +1805,34 @@ def handle_sacco_updates(raw: str, phone: str) -> str:
         if not rows:
             lines.append("No updates yet.")
         else:
-            for i, (chname, msg, _) in enumerate(rows, start=1):
-                txt = (msg or "").replace("\n", " ")
-                if len(txt) > 80:
-                    txt = txt[:80] + "…"
-                lines.append(f"{i}. {chname}: {txt}")
+            for i, (name, text, _) in enumerate(rows, start=1):
+                txt = (text or "").replace("\n", " ")
+                if len(txt) > 60:
+                    txt = txt[:60] + "…"
+                lines.append(f"{i}. {name}: {txt}")
         lines.append("0. Back")
         return "\n".join(lines)
 
-    # 5*2 -> explain
-    if len(parts) >= 2 and parts[1] == "2":
+    # 2 -> info text
+    if opt == "2":
         return "\n".join([
             "CON Sacco power",
-            "- Sacco can run an official channel",
-            "- Post safety rules + ID checks",
-            "- Announce verified riders + pricing norms",
-            "- Handle disputes via clear procedures",
+            "• Official Sacco channel for safety rules",
+            "• Verified riders list + ID checks",
+            "• Announce procedures + dispute handling",
+            "• Community trust + stable income",
             "",
             "Tip: create a channel in category 'Sacco'",
-            "then post updates to reach everyone.",
+            "then post updates for everyone.",
             "0. Back",
         ])
 
-    # Others
+    # 3/4 -> placeholders
+    if opt == "3":
+        return "CON Verified riders\nComing soon.\n0. Back"
+    if opt == "4":
+        return "CON Report issue\nComing soon.\n0. Back"
+
     return "CON Sacco Line\nInvalid option.\n0. Back"
 
 def handle_sacco_line(raw: str, phone: str) -> str:
@@ -2085,7 +2092,7 @@ def handle_ussd(session_id: str, phone_number: str, text: str):
 2. Local Businesses
 3. Register (Rider / Business)
 4. Change my place
-5. Sacco updates ->
+5. Sacco Line ->
 6. Listen (channels)
 7. My channel
 8. Travel ->
@@ -2098,8 +2105,12 @@ def handle_ussd(session_id: str, phone_number: str, text: str):
     # Channels (6/7) — handled here so core routes remain unchanged
     # Listen (channels)
     # Sacco Line (option 5)
+    # Sacco Line (option 5) — handled here so core remains unchanged
     if raw == "5" or raw.startswith("5*"):
-        return (handle_sacco_line(raw, phone), 200)
+        # Back-to-root behavior: 5*0 should return the real root (text="")
+        if raw == "5*0" or raw.startswith("5*0*"):
+            return handle_ussd(session_id=session_id, phone_number=phone, text="")
+        return (handle_sacco_updates(raw, phone), 200)
 
     if raw == "6" or raw.startswith("6*"):
         return (handle_listen_channels(raw), 200)
