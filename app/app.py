@@ -1,6 +1,6 @@
 from flask import Flask, request
 import landmark_game
-from angelopp import handle_ussd
+from ussd import handle_ussd, normalize_phone
 
 print('[USSD] running file:', __file__, flush=True)
 app = Flask(__name__)
@@ -10,7 +10,9 @@ landmark_game.ensure_schema()
 def ussd():
     session_id = request.form.get("sessionId", "") or ""
     phone_number = request.form.get("phoneNumber", "") or ""
+    phone_number = normalize_phone(phone_number)
     text = request.form.get("text", "") or ""
+    print("AT_IN:", session_id, phone_number, text, flush=True)
 
     rv = handle_ussd(session_id=session_id, phone_number=phone_number, text=text)
 
@@ -22,7 +24,7 @@ def ussd():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5002)
+    app.run(host="127.0.0.1", port=5002)
 
 
 def _stars(level:int)->str:

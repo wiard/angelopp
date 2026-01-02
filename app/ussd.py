@@ -12,7 +12,7 @@ MAX_LIST = 10
 # === LANDMARK HELPERS ===
 def save_landmark(phone: str, name: str, description: str):
     import sqlite3
-    db = sqlite3.connect("/opt/angelopp/data/bumala.db")
+    db = sqlite3.connect(DB_PATH)
     cur = db.cursor()
     cur.execute(
         "INSERT INTO landmarks (phone, name, description) VALUES (?, ?, ?)",
@@ -28,8 +28,104 @@ import sqlite3
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
+
+# --- villages (used by businesses menu) ---
+# pick_from_list() expects (key,label) pairs
+VILLAGES = [
+    ("1", "Bumala"),
+    ("2", "Butula"),
+    ("3", "Busia"),
+]
+# ------------------------------------------
+
 # === CHALLENGE_SCHEMA_V1 ===
 import re
+
+# Onboarding gate (role -> area -> landmark)
+import onboarding
+
+# ============================================================
+# User prefs (role) - stored per phone
+# ============================================================
+def ensure_user_prefs(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS user_prefs ("
+        " phone TEXT PRIMARY KEY,"
+        " role  TEXT NOT NULL DEFAULT 'customer',"
+        " updated_at TEXT NOT NULL DEFAULT (datetime('now'))"
+        ");"
+    )
+    conn.commit()
+
+def get_user_role(phone: str) -> str:
+    try:
+        conn = db()
+        ensure_user_prefs(conn)
+        cur = conn.cursor()
+        cur.execute("SELECT role FROM user_prefs WHERE phone = ? LIMIT 1;", (phone,))
+        row = cur.fetchone()
+        if row is None:
+            return 'customer'
+        # sqlite Row or tuple
+        try:
+            return (row['role'] or 'customer')
+        except Exception:
+            return (row[0] or 'customer')
+    except Exception:
+        return 'customer'
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def set_user_role(phone: str, role: str) -> None:
+    role = (role or 'customer').strip().lower()
+    if role not in ('customer', 'provider'):
+        role = 'customer'
+    conn = db()
+    ensure_user_prefs(conn)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO user_prefs(phone, role, updated_at) VALUES (?, ?, datetime('now')) "
+        "ON CONFLICT(phone) DO UPDATE SET role=excluded.role, updated_at=datetime('now');",
+        (phone, role),
+    )
+    conn.commit()
+    conn.close()
+
+def provider_home_menu() -> str:
+    lines = [
+        'CON Service Provider',
+        '1. My profile (register/update)',
+        '2. My services (add/remove)',
+        '3. Update my landmark',
+        '4. Incoming requests',
+        '9. Switch role',
+        '0. Exit',
+    ]
+    return '\n'.join(lines)
+
+def handle_role_switch(parts: list[str], phone: str) -> str:
+    # parts[0] == '9'
+    if len(parts) == 1:
+        return '\n'.join([
+            'CON Angelopp',
+            '1. I am a Customer',
+            '2. I am a Service Provider',
+            '0. Exit',
+        ])
+    choice = (parts[1] if len(parts) >= 2 else '').strip()
+    if choice == '1':
+        set_user_role(phone, 'customer')
+        return 'CON Role set ✓\nYou are now: Customer\n0. Back'
+    if choice == '2':
+        set_user_role(phone, 'provider')
+        return 'CON Role set ✓\nYou are now: Service Provider\n0. Back'
+    if choice == '0':
+        return 'END Bye'
+    return 'CON Invalid option.\n0. Back'
 
 # --- UI icons (safe defaults) ---
 ICON_GO = '->'
@@ -112,7 +208,7 @@ def _added_landmark_today(phone: str) -> bool:
     Uses absolute DB path to avoid 'wrong working directory' surprises.
     """
     import sqlite3
-    db = sqlite3.connect("/opt/angelopp/data/bumala.db")
+    db = sqlite3.connect(DB_PATH)
     try:
         cur = db.cursor()
         cur.execute(
@@ -130,7 +226,7 @@ def _added_landmark_today(phone: str) -> bool:
         db.close()
 
 # --- constants (auto-added) ---
-DB_PATH = os.path.join(os.path.dirname(__file__), "bumala.db")
+DB_PATH = '/opt/angelopp/data/bumala.db'
 # ------------------------------
 
 
@@ -197,8 +293,69 @@ def ensure_schema() -> None:
         created_at TEXT DEFAULT (datetime('now'))
     )
     """)
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_landmarks_phone ON landmarks(phone)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_landmarks_added_by ON landmarks(phone)")
+    # Landmarks indexes
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_landmarks_village ON landmarks(village)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_landmarks_added_by ON landmarks(added_by)")
+
+
+    # =========================================================
+    # Channels (community micro-radio) — MVP
+    # =========================================================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS channels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_phone TEXT NOT NULL,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'Community',
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_channels_owner ON channels(owner_phone)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_channels_category ON channels(category)")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS channel_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel_id INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY(channel_id) REFERENCES channels(id)
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_channel_messages_channel ON channel_messages(channel_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_channel_messages_created ON channel_messages(created_at)")
+
+
+    # -----------------------------
+    # Channels (text-only micro radio)
+    # -----------------------------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS channels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_phone TEXT NOT NULL,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'Community',
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """)
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_channels_owner_active ON channels(owner_phone, is_active)")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS channel_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel_id INTEGER NOT NULL,
+        sender_phone TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY(channel_id) REFERENCES channels(id)
+    )
+    """)
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_channel_messages_channel ON channel_messages(channel_id, created_at)")
+
 
     # Points / Challenge rewards
     cur.execute("""
@@ -513,34 +670,69 @@ def create_callback_request(session_id: str, customer_phone: str, target_phone: 
 
 def get_customer_context(phone: str):
     """
-    Returns (village, landmark_name) for this phone from most recent landmark entry.
-    Falls back to (None, None) if nothing found / not set.
+    Return (village, landmark).
+
+    New preferred source:
+      - onboarding.user_prefs (role/area_type/landmark) in /opt/angelopp/data/bumala.db
+
+    Old fallback (legacy tables):
+      - kept only if it works; never crash.
     """
-    conn = db()
+    # 1) Preferred: onboarding prefs (new flow)
     try:
+        prefs = onboarding.get_prefs(phone)
+        if prefs and prefs.get("landmark"):
+            area = (prefs.get("area_type") or "village").strip().lower()
+            # Keep legacy code expecting 'village' to be a village name
+            village = "Bumala" if area == "village" else area.title()
+            return village, prefs["landmark"]
+    except Exception:
+        pass
+
+    # 2) Fallback: legacy logic (if present in DB) — but NEVER crash
+    try:
+        # If your codebase defines a db/connect helper, try to use it.
+        if "get_db" in globals():
+            conn = get_db()
+        elif "db" in globals():
+            conn = db()
+        else:
+            # Last resort: sqlite3 connect to the same DB path onboarding uses
+            import sqlite3
+            conn = sqlite3.connect(str(onboarding.DB_PATH))
         cur = conn.cursor()
-        # newest first: prefer created_at then id as tie-breaker
-        cur.execute(
-            """
-            SELECT village, name
-            FROM landmarks
-            WHERE phone = ?
-            ORDER BY datetime(created_at) DESC, id DESC
-            LIMIT 1
-            """,
-            (phone,),
-        )
-        row = cur.fetchone()
-        if not row:
-            return (None, None)
-        village = row[0]
-        landmark = row[1]
-        return (village, landmark)
-    finally:
+
+        # Try common legacy tables/columns without assuming exact schema
+        # First attempt: customer_locations(phone, village, landmark)
         try:
-            conn.close()
+            cur.execute("SELECT village, landmark FROM customer_locations WHERE phone=? ORDER BY id DESC LIMIT 1", (phone,))
+            row = cur.fetchone()
+            if row and row[0] and row[1]:
+                return row[0], row[1]
         except Exception:
             pass
+
+        # Second attempt: landmarks(phone, village, name) or landmarks(added_by, village, name)
+        try:
+            cols = [r[1] for r in cur.execute("PRAGMA table_info(landmarks)").fetchall()]
+            if "phone" in cols:
+                cur.execute("SELECT village, name FROM landmarks WHERE phone=? ORDER BY id DESC LIMIT 1", (phone,))
+                row = cur.fetchone()
+                if row and row[0] and row[1]:
+                    return row[0], row[1]
+            elif "added_by" in cols:
+                cur.execute("SELECT village, name FROM landmarks WHERE added_by=? ORDER BY id DESC LIMIT 1", (phone,))
+                row = cur.fetchone()
+                if row and row[0] and row[1]:
+                    return row[0], row[1]
+        except Exception:
+            pass
+
+    except Exception:
+        pass
+
+    # 3) Safe default
+    return "Bumala", "Church"
 
 
 def handle_find_rider(parts: List[str], session_id: str, phone: str) -> Tuple[str, int]:
@@ -994,7 +1186,7 @@ def nearest_drivers_screen(phone: str, village: str, landmark: str, limit: int =
     lines.append("0. Back")
     return "\n".join(lines)
 
-def handle_ussd(session_id: str, phone_number: str, text: str) -> Tuple[str, int]:
+def handle_ussd_core(session_id: str, phone_number: str, text: str) -> Tuple[str, int]:
     """
     Africa's Talking POST form fields:
       sessionId, phoneNumber, text
@@ -1005,6 +1197,44 @@ def handle_ussd(session_id: str, phone_number: str, text: str) -> Tuple[str, int
 
     phone = normalize_phone(phone_number)
     parts = parse_text(text)
+    # --- TRAVEL (customer submenu) ---
+    if parts and parts[0] == '8':
+        return handle_travel(parts, session_id, phone)
+
+
+    # --- TRAVEL INTERCEPT (customer option 8) ---
+    try:
+        role = get_user_role(phone_number)
+    except Exception:
+        role = "Customer"
+
+    if parts and parts[0] == "8" and role == "Customer":
+        return ussd_response(handle_travel(parts, session_id, phone_number)), 200
+    # -------------------------------------------
+
+
+    # --- CUSTOMER TRAVEL (submenu) ---
+    try:
+        role = get_user_role(phone_number)
+    except Exception:
+        role = "Customer"
+    if parts and parts[0] == "8" and role == "Customer":
+        return ussd_response(handle_travel(parts, session_id, phone_number)), 200
+    # ---------------------------------
+
+
+    # --- ROLE SWITCH (early intercept) ---
+    if parts and parts[0] == '9':
+        return handle_role_switch(parts, phone)
+
+    # --- PROVIDER ROOT OVERRIDE ---
+    if not parts:
+        try:
+            role = get_user_role(phone)
+        except Exception:
+            role = 'customer'
+        if role == 'provider':
+            return ussd_response('CON Bumala Directory\\n1. Find a Rider ->\\n2. Local Businesses\\n3. Register (Rider / Business)\\n4. Today’s Challenge *\\n5. Set my location\\n0. Exit'), 200
 
     # empty -> show main menu
     if not parts:
@@ -1070,4 +1300,372 @@ def get_nearest_drivers(phone: str, village: str, landmark: str | None = None, l
 
     ranked = rank_drivers(customer, drivers)
     return ranked[:limit]
+
+
+
+# =========================================================
+# Channels — MVP handlers (Listen + My channel)
+# Menu uses options 6 and 7 in Role Home to avoid breaking core routes.
+# =========================================================
+
+CHANNEL_CATEGORIES = ["Community", "Business", "Sacco", "Education", "Entertainment"]
+
+def _db():
+    # Always use the same DB as onboarding (this VPS uses /opt/angelopp/app/bumala.db)
+    return sqlite3.connect(str(onboarding.DB_PATH))
+
+def get_my_channel(phone: str):
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, category FROM channels WHERE owner_phone=? AND is_active=1 ORDER BY id DESC LIMIT 1", (phone,))
+    row = cur.fetchone()
+    conn.close()
+    return row  # (id, name, category) or None
+
+def can_post_today(channel_id: int) -> bool:
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT COUNT(*) FROM channel_messages
+        WHERE channel_id=? AND date(created_at)=date('now','localtime')
+    """, (channel_id,))
+    n = int(cur.fetchone()[0] or 0)
+    conn.close()
+    return n < 1  # MVP: max 1 message per day
+
+def create_channel(phone: str, name: str, category: str) -> int:
+    name = (name or "").strip()
+    if len(name) > 24:
+        name = name[:24]
+    if not name:
+        name = "My Channel"
+    if category not in CHANNEL_CATEGORIES:
+        category = "Community"
+
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO channels(owner_phone,name,category) VALUES(?,?,?)", (phone, name, category))
+    cid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return int(cid)
+
+def post_message(channel_id: int, text: str) -> int:
+    text = (text or "").strip()
+    if len(text) > 240:
+        text = text[:240]
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO channel_messages(channel_id,text) VALUES(?,?)", (channel_id, text))
+    mid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return int(mid)
+
+def get_latest_messages(category: str, limit: int = 5):
+    if category not in CHANNEL_CATEGORIES:
+        category = "Community"
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT c.name, m.text, m.created_at
+        FROM channel_messages m
+        JOIN channels c ON c.id=m.channel_id
+        WHERE c.is_active=1 AND c.category=?
+        ORDER BY m.id DESC
+        LIMIT ?
+    """, (category, int(limit)))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+def handle_listen_channels(raw: str) -> str:
+    parts = (raw or "").split("*")
+
+    # raw == "6" -> show categories
+    if raw == "6":
+        lines = ["Listen (channels)"]
+        for i, cat in enumerate(CHANNEL_CATEGORIES, start=1):
+            lines.append(f"{i}. {cat}")
+        lines.append("0. Back")
+        return "CON " + "\n".join(lines)
+
+    # raw like "6*1" -> list latest messages
+    if len(parts) >= 2 and parts[0] == "6":
+        choice = parts[1].strip()
+        if choice == "0":
+            return "CON Back\n0. Back"
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(CHANNEL_CATEGORIES):
+                cat = CHANNEL_CATEGORIES[idx]
+                rows = get_latest_messages(cat, limit=5)
+                lines = [f"{cat} — latest"]
+                if not rows:
+                    lines.append("No messages yet.")
+                else:
+                    for k, (name, text, _) in enumerate(rows, start=1):
+                        txt = (text or "").replace("\n", " ")
+                        if len(txt) > 60:
+                            txt = txt[:60] + "…"
+                        lines.append(f"{k}. {name}: {txt}")
+                lines.append("0. Back")
+                return "CON " + "\n".join(lines)
+
+    return "CON Listen\n0. Back"
+
+def handle_my_channel(raw: str, phone: str) -> str:
+    parts = (raw or "").split("*")
+    # raw == "7" -> show dashboard or create prompt
+    if raw == "7":
+        ch = get_my_channel(phone)
+        if not ch:
+            return "CON My channel\nYou don’t have a channel yet.\n1. Create my channel\n0. Back"
+        cid, name, cat = ch
+        return (
+            "CON My channel: " + name + "\n"
+            "1. Post message\n"
+            "2. View last message\n"
+            "3. Rename channel\n"
+            "0. Back"
+        )
+
+    # If no channel yet and user selects create
+    if parts[0] == "7":
+        ch = get_my_channel(phone)
+
+        # Create flow:
+        # 7*1 -> ask name
+        if len(parts) == 2 and parts[1] == "1" and not ch:
+            return "CON Create channel\nType a name:"
+
+        # 7*1*<name> -> choose category
+        if len(parts) == 3 and parts[1] == "1" and not ch:
+            name = parts[2]
+            lines = ["CON Choose category:"]
+            for i, cat in enumerate(CHANNEL_CATEGORIES, start=1):
+                lines.append(f"{i}. {cat}")
+            lines.append("0. Cancel")
+            return "\n".join(lines)
+
+        # 7*1*<name>*<cat> -> create
+        if len(parts) >= 4 and parts[1] == "1" and not ch:
+            name = parts[2]
+            c = parts[3].strip()
+            if c == "0":
+                return "CON Cancelled\n0. Back"
+            if c.isdigit():
+                idx = int(c) - 1
+                cat = CHANNEL_CATEGORIES[idx] if 0 <= idx < len(CHANNEL_CATEGORIES) else "Community"
+                cid = create_channel(phone, name, cat)
+                return f"CON Channel created ✓\nName: {name[:24]}\nCategory: {cat}\n0. Back"
+
+        # Existing channel actions
+        if ch:
+            cid, name, cat = ch
+
+            # Post message:
+            # 7*1 -> ask text
+            if len(parts) == 2 and parts[1] == "1":
+                if not can_post_today(cid):
+                    return "CON Limit reached\nYou can post 1 message/day.\n0. Back"
+                return "CON Post message (max 240 chars):"
+
+            # 7*1*<text> -> save
+            if len(parts) >= 3 and parts[1] == "1":
+                if not can_post_today(cid):
+                    return "CON Limit reached\nYou can post 1 message/day.\n0. Back"
+                text = "*".join(parts[2:])  # keep '*' typed content
+                post_message(cid, text)
+                return "CON Posted ✓\n0. Back"
+
+            # View last:
+            if len(parts) == 2 and parts[1] == "2":
+                conn = _db()
+                cur = conn.cursor()
+                cur.execute("SELECT text, created_at FROM channel_messages WHERE channel_id=? ORDER BY id DESC LIMIT 1", (cid,))
+                row = cur.fetchone()
+                conn.close()
+                if not row:
+                    return "CON No messages yet.\n0. Back"
+                text, ts = row
+                text = (text or "").replace("\n", " ")
+                return f"CON Last message:\n{text}\n0. Back"
+
+            # Rename:
+            # 7*3 -> ask new name
+            if len(parts) == 2 and parts[1] == "3":
+                return "CON Rename channel\nType new name:"
+
+            # 7*3*<newname> -> save
+            if len(parts) >= 3 and parts[1] == "3":
+                newname = parts[2].strip()[:24] or "My Channel"
+                conn = _db()
+                cur = conn.cursor()
+                cur.execute("UPDATE channels SET name=? WHERE id=?", (newname, cid))
+                conn.commit()
+                conn.close()
+                return f"CON Renamed ✓\nNew name: {newname}\n0. Back"
+
+    return "CON My channel\n0. Back"
+
+# -----------------------------
+# New handle_ussd: onboarding gate first, then existing logic
+# -----------------------------
+def handle_ussd(session_id: str, phone_number: str, text: str):
+    phone = (phone_number or "").strip()
+    raw = (text or "").strip()
+
+    # 1) If onboarding not complete, return onboarding screens
+    resp = onboarding.onboarding_response(session_id=session_id, phone=phone, text=raw)
+    if resp is not None:
+        return (resp, 200)
+
+    # 2) Onboarded: show new "Role Home" when user starts (empty text)
+    try:
+        prefs = onboarding.get_prefs(phone)
+    except Exception:
+        prefs = {"role": "customer", "area_type": "village", "landmark": "Church"}
+
+    role = (prefs.get("role") or "customer").strip().lower()
+    area = (prefs.get("area_type") or "village").strip()
+    landmark = (prefs.get("landmark") or "Church").strip()
+
+    # Exit if user explicitly chooses 0 at top-level
+    last = raw.split("*")[-1] if raw else ""
+
+    if raw == "":
+        title = "Customer" if role == "customer" else "Service Provider"
+        menu = f"""{title} ({area}: {landmark})
+1. Find a Rider ->
+2. Local Businesses
+3. Register (Rider / Business)
+4. Change my place
+6. Listen (channels)
+7. My channel
+    8. Travel ->
+9. Switch role
+0. Exit"""
+        return ("CON " + menu, 200)
+
+    # Intercepts (before core)
+
+    # Channels (6/7) — handled here so core routes remain unchanged
+    if raw == "6" or raw.startswith("6*"):
+        return (handle_listen_channels(raw), 200)
+
+    if raw == "7" or raw.startswith("7*"):
+        return (handle_my_channel(raw, phone), 200)
+
+    if last == "0":
+        return ("END Bye.", 200)
+
+    if last == "4":
+        # Keep role, reset place => onboarding will ask area/landmark again
+        try:
+            onboarding.clear_location(phone)
+        except Exception:
+            pass
+        # Ask area again
+        r2 = onboarding.onboarding_response(session_id=session_id, phone=phone, text="")
+        return ((r2 or """CON Choose your area:
+1. Village
+2. Town/City
+3. Airport
+0. Back"""), 200)
+
+    if last == "9":
+        # Reset everything => onboarding will ask role again
+        try:
+            onboarding.clear_role(phone)
+        except Exception:
+            pass
+        r2 = onboarding.onboarding_response(session_id=session_id, phone=phone, text="")
+        return ((r2 or """CON Angelopp
+1. I am a Customer
+2. I am a Service Provider
+0. Exit"""), 200)
+
+    # 3) Otherwise: run the original logic
+    return handle_ussd_core(session_id=session_id, phone_number=phone_number, text=raw)
+
+
+# ============================================================
+# Travel (customer submenu) - placeholder flow
+# ============================================================
+def handle_travel(parts, session_id: str, phone: str):
+    """
+    Travel submenu (Customer).
+    Uses ussd_response() so output is always CON/END compatible with Africa's Talking.
+    Flow:
+      8               -> menu
+      8*0             -> back to root
+      8*1             -> Plan a trip (asks From)
+      8*1*<FROM>      -> asks To
+      8*1*<FROM>*<TO> -> shows summary (placeholder)
+      8*2             -> Find transport (placeholder)
+      8*3             -> My trips (placeholder)
+    """
+    def _resp(body: str):
+        # Prefer the project's wrapper (adds CON/END, etc.)
+        if "ussd_response" in globals():
+            return ussd_response(body), 200
+        # Fallback (shouldn't happen in your project)
+        body = body.strip("\n")
+        if not (body.startswith("CON ") or body.startswith("END ")):
+            body = "CON " + body
+        return body, 200
+
+    # 8 -> show menu
+    if len(parts) == 1:
+        return _resp(
+            "Travel\n"
+            "1. Plan a trip\n"
+            "2. Find transport\n"
+            "3. My trips (soon)\n"
+            "0. Back"
+        )
+
+    choice = parts[1]
+
+    # Back -> root menu (role-aware root will be applied there)
+    if choice == "0":
+        if "handle_ussd_core" in globals():
+            return handle_ussd_core(session_id=session_id, phone_number=phone, text="")
+        return _resp("Back\n0. Exit")
+
+    # 1) Plan a trip (simple wizard)
+    if choice == "1":
+        if len(parts) == 2:
+            return _resp("Plan a trip\nFrom (type a place):\n0. Back")
+        if len(parts) == 3:
+            frm = parts[2].strip()[:32]
+            return _resp(f"Plan a trip\nFrom: {frm}\nTo (type a place):\n0. Back")
+        if len(parts) >= 4:
+            frm = parts[2].strip()[:32]
+            to = parts[3].strip()[:32]
+            return _resp(
+                "Trip draft\n"
+                f"From: {frm}\n"
+                f"To: {to}\n"
+                "Next: we can add date/time + budget + save it.\n"
+                "0. Back"
+            )
+
+    # 2) Find transport (placeholder)
+    if choice == "2":
+        return _resp(
+            "Find transport (soon)\n"
+            "1. Boda / Rider\n"
+            "2. Tuktuk\n"
+            "3. Bus\n"
+            "0. Back"
+        )
+
+    # 3) My trips (placeholder)
+    if choice == "3":
+        return _resp("My trips (soon)\n0. Back")
+
+    return _resp("Invalid option.\n0. Back")
+
 
