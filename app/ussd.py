@@ -1609,7 +1609,7 @@ def can_post_today(channel_id: int) -> bool:
     conn = _db()
     cur = conn.cursor()
     cur.execute("""
-        SELECT COUNT(*) FROM channel_messages
+        SELECT COUNT(*) FROM messages
         WHERE channel_id=? AND date(created_at)=date('now','localtime')
     """, (channel_id,))
     n = int(cur.fetchone()[0] or 0)
@@ -2008,7 +2008,7 @@ def handle_my_channel(raw: str, phone: str) -> str:
             if len(parts) == 2 and parts[1] == "2":
                 conn = _db()
                 cur = conn.cursor()
-                cur.execute("SELECT text, created_at FROM channel_messages WHERE channel_id=? ORDER BY id DESC LIMIT 1", (cid,))
+                cur.execute("SELECT text, created_at FROM messages WHERE channel_id=? ORDER BY id DESC LIMIT 1", (cid,))
                 row = cur.fetchone()
                 conn.close()
                 if not row:
