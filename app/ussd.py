@@ -71,6 +71,61 @@ SMS = DummySmsAdapter() if DummySmsAdapter else None
 VOICE = DummyVoiceAdapter() if DummyVoiceAdapter else None
 
 
+
+
+def _biz_village_pairs():
+    """
+    Returns list of (code, village_name) for menus.
+    Tries VILLAGES and/or _village_pairs if present.
+    """
+    # Preferred: existing helper
+    try:
+        if "_village_pairs" in globals():
+            vp = _village_pairs()
+            out = []
+            for item in vp:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    out.append((str(item[0]), str(item[1])))
+                else:
+                    out.append((str(len(out)+1), str(item)))
+            if out:
+                return out
+    except Exception:
+        pass
+
+    # Fallback: VILLAGES constant
+    try:
+        V = globals().get("VILLAGES")
+        if V:
+            out = []
+            for item in V:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    out.append((str(item[0]), str(item[1])))
+                else:
+                    out.append((str(len(out)+1), str(item)))
+            if out:
+                return out
+    except Exception:
+        pass
+
+    # Last resort hardcoded
+    return [("1","Bumala"), ("2","Butula"), ("3","Busia")]
+
+def _biz_village_from_choice(choice: str) -> str:
+    c = (choice or "").strip()
+    if not c:
+        return ""
+    # numeric mapping
+    if c.isdigit():
+        pairs = _biz_village_pairs()
+        idx = int(c) - 1
+        if 0 <= idx < len(pairs):
+            return pairs[idx][1]
+        return ""
+    # direct village name
+    return c.strip().title()
+
+
 def _to_float(x, default=None):
     try:
         return float(x)
@@ -1823,7 +1878,16 @@ def handle_ussd(session_id: str, phone_number: str, text: str):
     phone = (phone_number or "").strip()
     raw = (text or "").strip()
 
-    # 1) If onboarding not complete, return onboarding screens
+    
+
+    # BIZ_BACK_TO_ROOT_V1: ensure businesses back-to-root never hits legacy directory
+    if raw == "2*0":
+        try:
+            return handle_ussd(session_id=session_id, phone_number=phone_number, text="")
+        except Exception:
+            # last resort: behave like top-level root
+            return handle_ussd(session_id=session_id, phone_number=phone_number, text="")
+# 1) If onboarding not complete, return onboarding screens
     resp = onboarding.onboarding_response(session_id=session_id, phone=phone, text=raw)
     if resp is not None:
         return (resp, 200)
@@ -1863,6 +1927,12 @@ def handle_ussd(session_id: str, phone_number: str, text: str):
 
     if raw == "7" or raw.startswith("7*"):
         return (handle_my_channel(raw, phone), 200)
+
+
+    # BUSINESSES_ROUTER_V3: force businesses flow through handle_businesses_v2 (never 500)
+    if raw == "2" or raw.startswith("2*"):
+        parts = (raw or "").split("*")
+        return (handle_businesses_v2(parts, session_id=session_id, phone=phone), 200)
 
     if last == "0":
         return ("END Bye.", 200)
@@ -2057,73 +2127,84 @@ def handle_change_place_v3(parts, phone: str):
 
     return ussd_response("CON Invalid option.\n0. Back"), 200
 def handle_businesses_v2(parts, session_id: str, phone: str):
-    # parts[0] == "2"
-    # 2           -> choose village
-    # 2*<k>       -> list businesses in that village
-    # 2*<k>*<n>   -> show selected business (placeholder)
-    if len(parts) == 1:
-        return ussd_response(village_menu("Businesses in which village?")), 200
-
-    if parts[1] == "0":
-        return ussd_response(main_menu()), 200
-
-    village = village_name_from_choice(parts[1]) or parts[1]
-
-    # fetch businesses from DB if the schema exists
-    items = []
+    """
+    Businesses flow (safe, never 500):
+      2                  -> choose village
+      2*<vchoice>         -> list in village
+      2*<vchoice>*<idx>   -> detail
+    vchoice can be '1/2/3' or a village name.
+    """
     try:
+        if not parts or parts[0] != "2":
+            return "CON Invalid option.\n0. Back"
+
+        # 2 -> village menu
+        if len(parts) == 1:
+            lines = ["CON Businesses in which village?"]
+            for code, name in _biz_village_pairs():
+                # ensure codes are 1..N as USSD expects
+                # if code isn't numeric, still display sequentially
+                lines.append(f"{code}. {name}")
+            lines.append("0. Back")
+            return "\n".join(lines)
+
+        # back
+        if parts[1] == "0":
+            return "CON " + main_menu(phone)
+
+        v = _biz_village_from_choice(parts[1])
+        if not v:
+            return "CON Invalid village.\n0. Back"
+
         conn = db()
         cur = conn.cursor()
-        # providers(phone, provider_type, name, village, current_landmark, is_available, ...)
         cur.execute("""
-            SELECT name, phone, COALESCE(current_landmark,'') AS lm
+            SELECT phone, name, COALESCE(current_landmark,'') AS landmark
             FROM providers
-            WHERE provider_type='business'
-              AND village=?
-            ORDER BY name ASC
-            LIMIT 9
-        """, (village,))
-        rows = cur.fetchall()
-        for name, ph, lm in rows:
-            items.append((str(name or "Business"), str(ph or ""), str(lm or "")))
-    except Exception:
-        items = []
+            WHERE lower(trim(provider_type))='business'
+              AND trim(village)=trim(?)
+            ORDER BY name
+            LIMIT 20
+        """, (v,))
+        rows = cur.fetchall() or []
 
-    if len(parts) == 2:
-        lines = [f"CON Businesses in {village}"]
-        if not items:
-            lines.append("No businesses yet.")
+        # 2*<v> -> list
+        if len(parts) == 2:
+            lines = [f"CON Businesses in {v}"]
+            if not rows:
+                lines.append("No businesses yet.")
+                lines.append("0. Back")
+                return "\n".join(lines)
+            for i, r in enumerate(rows, start=1):
+                nm = (r["name"] if hasattr(r, "__getitem__") else r[1]) or "Business"
+                lines.append(f"{i}. {nm} ->")
             lines.append("0. Back")
-            return ussd_response("\n".join(lines)), 200
+            return "\n".join(lines)
 
-        for i,(name, ph, lm) in enumerate(items, 1):
-            extra = f" ({lm})" if lm else ""
-            lines.append(f"{i}. {name}{extra} ->")
-        lines.append("0. Back")
-        return ussd_response("\n".join(lines)), 200
-
-    # details / placeholder
-    if len(parts) >= 3:
-        if parts[2] == "0":
-            return ussd_response(village_menu("Businesses in which village?")), 200
+        # 2*<v>*<idx>
+        idx_raw = (parts[2] or "").strip() if len(parts) >= 3 else ""
+        if idx_raw == "0":
+            return f"CON Businesses in {v}\n0. Back"
 
         try:
-            idx = int(parts[2])
+            idx = int(idx_raw) - 1
         except Exception:
-            return ussd_response("CON Invalid option.\n0. Back"), 200
+            return "CON Invalid option.\n0. Back"
 
-        if idx < 1 or idx > len(items):
-            return ussd_response("CON Invalid option.\n0. Back"), 200
+        if idx < 0 or idx >= len(rows):
+            return "CON Invalid business.\n0. Back"
 
-        name, ph, lm = items[idx-1]
-        lines = [
-            "CON Business",
-            f"Name: {name}",
-            f"Phone: {ph}",
-        ]
-        if lm:
-            lines.append(f"Place: {lm}")
+        r = rows[idx]
+        bphone = r["phone"] if hasattr(r, "__getitem__") else r[0]
+        bname  = r["name"] if hasattr(r, "__getitem__") else r[1]
+        blm    = r["landmark"] if hasattr(r, "__getitem__") else r[2]
+
+        lines = ["CON Business", f"Name: {bname}", f"Phone: {bphone}"]
+        if blm:
+            lines.append(f"Place: {blm}")
         lines.append("0. Back")
-        return ussd_response("\n".join(lines)), 200
+        return "\n".join(lines)
 
-    return ussd_response("CON Invalid option.\n0. Back"), 200
+    except Exception:
+        return "CON Businesses\nTemporary error.\n0. Back"
+
