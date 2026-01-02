@@ -1767,6 +1767,123 @@ def get_latest_messages(category: str, limit: int = 5):
     except Exception:
         return []
 
+
+def handle_sacco_updates(raw: str, phone: str) -> str:
+    """
+    Sacco Line: trust + coordination layer.
+    - Show latest Sacco messages (uses existing channel_messages table if present).
+    - Explain how sacco can grow with Angelopp.
+    - Placeholder for verified riders + reporting.
+    Never throws: USSD must not 500.
+    """
+    parts = (raw or "").split("*")
+
+    # Root
+    if raw == "5":
+        return "\n".join([
+            "CON Sacco Line",
+            "1. Latest Sacco updates",
+            "2. What Sacco can do here",
+            "3. Verified riders (soon)",
+            "4. Report issue (soon)",
+            "0. Back",
+        ])
+
+    # Back
+    if len(parts) >= 2 and parts[1] == "0":
+        return "CON Back\n0. Back"
+
+    # 5*1 -> latest Sacco updates
+    if len(parts) >= 2 and parts[1] == "1":
+        try:
+            rows = get_latest_messages("Sacco", limit=5)
+        except Exception:
+            rows = []
+        lines = ["CON Sacco — latest"]
+        if not rows:
+            lines.append("No updates yet.")
+        else:
+            for i, (chname, msg, _) in enumerate(rows, start=1):
+                txt = (msg or "").replace("\n", " ")
+                if len(txt) > 80:
+                    txt = txt[:80] + "…"
+                lines.append(f"{i}. {chname}: {txt}")
+        lines.append("0. Back")
+        return "\n".join(lines)
+
+    # 5*2 -> explain
+    if len(parts) >= 2 and parts[1] == "2":
+        return "\n".join([
+            "CON Sacco power",
+            "- Sacco can run an official channel",
+            "- Post safety rules + ID checks",
+            "- Announce verified riders + pricing norms",
+            "- Handle disputes via clear procedures",
+            "",
+            "Tip: create a channel in category 'Sacco'",
+            "then post updates to reach everyone.",
+            "0. Back",
+        ])
+
+    # Others
+    return "CON Sacco Line\nInvalid option.\n0. Back"
+
+def handle_sacco_line(raw: str, phone: str) -> str:
+    """
+    Sacco Line: coordination + trust layer for sacco's.
+    Uses existing channel_messages via get_latest_messages("Sacco").
+    Never throws (USSD must not 500).
+    """
+    parts = (raw or "").split("*")
+
+    if raw == "5":
+        return "\n".join([
+            "CON Sacco Line",
+            "1. Latest Sacco updates",
+            "2. How Sacco grows with Angelopp",
+            "3. Verified riders (soon)",
+            "4. Report issue (soon)",
+            "0. Back",
+        ])
+
+    # back
+    if len(parts) >= 2 and parts[1] == "0":
+        return "CON Back\n0. Back"
+
+    # latest updates
+    if len(parts) >= 2 and parts[1] == "1":
+        try:
+            rows = get_latest_messages("Sacco", limit=5)
+        except Exception:
+            rows = []
+        lines = ["CON Sacco — latest"]
+        if not rows:
+            lines.append("No updates yet.")
+        else:
+            for i, (chname, msg, _) in enumerate(rows, start=1):
+                txt = (msg or "").replace("\n"," ")
+                if len(txt) > 80:
+                    txt = txt[:80] + "…"
+                lines.append(f"{i}. {chname}: {txt}")
+        lines.append("0. Back")
+        return "\n".join(lines)
+
+    # explainer
+    if len(parts) >= 2 and parts[1] == "2":
+        return "\n".join([
+            "CON Sacco power",
+            "• Official Sacco channel for safety rules",
+            "• Verified riders list + ID checks",
+            "• Announce procedures + dispute handling",
+            "• Community trust + stable income",
+            "",
+            "Tip: create a channel in category 'Sacco'",
+            "then post updates for everyone.",
+            "0. Back",
+        ])
+
+    return "CON Sacco Line\nInvalid option.\n0. Back"
+
 def handle_listen_channels(raw: str) -> str:
     parts = (raw or "").split("*")
 
@@ -1968,6 +2085,7 @@ def handle_ussd(session_id: str, phone_number: str, text: str):
 2. Local Businesses
 3. Register (Rider / Business)
 4. Change my place
+5. Sacco updates ->
 6. Listen (channels)
 7. My channel
 8. Travel ->
@@ -1978,12 +2096,17 @@ def handle_ussd(session_id: str, phone_number: str, text: str):
     # Intercepts (before core)
 
     # Channels (6/7) — handled here so core routes remain unchanged
+    # Listen (channels)
+    # Sacco Line (option 5)
+    if raw == "5" or raw.startswith("5*"):
+        return (handle_sacco_line(raw, phone), 200)
+
     if raw == "6" or raw.startswith("6*"):
         return (handle_listen_channels(raw), 200)
 
+    # My channel
     if raw == "7" or raw.startswith("7*"):
         return (handle_my_channel(raw, phone), 200)
-
 
     # BUSINESSES_ROUTER_V3: force businesses flow through handle_businesses_v2 (never 500)
     if raw == "2" or raw.startswith("2*"):
