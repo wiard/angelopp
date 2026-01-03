@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pathlib import Path
 # --- Relative distance engine ---
 from relative_distance import PersonLocation, rank_drivers
 
@@ -2299,6 +2300,70 @@ def handle_customer_service_1(raw: str, phone: str, session_id: str):
     except Exception as e:
         print("[USSD][EXC] handle_customer_service_1 failed", {"phone": phone, "raw": raw, "err": str(e)}, flush=True)
         return ("END System error. Please try again.", 200)
+
+
+# ---------------------------------------------------------
+# Compatibility: Shops/Businesses handler referenced by menu
+# ---------------------------------------------------------
+def handle_businesses_v2(db_path=None, phone=None, text=None, village="Bumala", session_id=None, parts=None, **kwargs):
+    # SMART_ARG_FIX: db_path may be a list (router passes parts as first arg)
+    # Normalize so this function works with BOTH call styles:
+    #   (db_path, phone, text, village=...)
+    #   (parts, session_id=..., phone=...)
+    if isinstance(db_path, (list, tuple)) and parts is None:
+        parts = list(db_path)
+        db_path = None
+
+    # If text not provided but parts is, reconstruct raw text
+    if (text is None or text == "") and isinstance(parts, (list, tuple)):
+        text = "*".join([str(x) for x in parts])
+
+    # If db_path still not a usable path, force default
+    if not isinstance(db_path, (str, bytes, Path)):
+        db_path = "/opt/angelopp/data/bumala.db"
+
+    """
+    Return a USSD screen listing businesses (your 'businesses' table).
+    Expected DB schema:
+      businesses(id, owner_phone, name, category, village, location, ...)
+    """
+    import sqlite3
+
+    # normalize village
+    village = (village or "").strip() or "Bumala"
+
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    # Pull a few businesses for that village
+    cur.execute("""
+        SELECT id, name, category, COALESCE(location,'') AS location
+        FROM businesses
+        WHERE village = ?
+        ORDER BY id DESC
+        LIMIT 9
+    """, (village,))
+    rows = cur.fetchall()
+    con.close()
+
+    # Build USSD response
+    if not rows:
+        return "CON Local Businesses (" + village + ")\nNo businesses yet.\n0. Back"
+
+    out = []
+    out.append("CON Local Businesses (" + village + ")")
+    for i, r in enumerate(rows, start=1):
+        name = (r["name"] or "").strip()
+        cat = (r["category"] or "").strip()
+        loc = (r["location"] or "").strip()
+        tail = []
+        if cat: tail.append(cat)
+        if loc: tail.append(loc)
+        meta = (" - " + " / ".join(tail)) if tail else ""
+        out.append(f"{i}. {name}{meta}")
+    out.append("0. Back")
+    return "\n".join(out)
 
 def handle_ussd(session_id: str, phone_number: str, text: str):
     # Normalize inputs (Africa's Talking sometimes sends leading spaces)
