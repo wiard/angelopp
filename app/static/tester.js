@@ -28,9 +28,10 @@ async function postUssd() {
 
   const r = await fetch(base, { method:"POST", body });
   const resp = await r.text();
-  $("resp").textContent = resp;
-  renderClickableOptions(resp);
-  return resp;
+  $("resp").textContent = resp;  renderClickableOptions(resp);
+  try { await loadPanels(); } catch (e) {
+    console.warn("loadPanels failed", e);
+  }
 }
 
 function renderClickableOptions(respText) {

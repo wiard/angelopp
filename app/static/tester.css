@@ -1,50 +1,151 @@
-:root { --bg:#0b1220; --card:#121b2f; --text:#e8eefc; --muted:#aab7d6; --accent:#4ea1ff; --good:#41d17e; --warn:#ffc857; --bad:#ff5c7a; }
-* { box-sizing:border-box; }
-body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--text); }
-header { display:flex; justify-content:space-between; align-items:center; padding:18px 18px; border-bottom:1px solid rgba(255,255,255,.08); }
-.brand { display:flex; gap:12px; align-items:center; }
-.logo { width:40px; height:40px; border-radius:12px; background:var(--accent); display:flex; align-items:center; justify-content:center; font-weight:800; color:#06101f; }
-.title { font-weight:800; letter-spacing:.2px; }
-.subtitle { color:var(--muted); font-size:12px; margin-top:2px; }
-.status { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
-.pill { padding:6px 10px; border-radius:999px; background:rgba(255,255,255,.08); color:var(--muted); font-size:12px; }
-main { padding:18px; display:grid; gap:16px; grid-template-columns: 1fr; max-width:1100px; margin:0 auto; }
-.card { background:var(--card); border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:16px; }
-h2 { margin:0 0 12px 0; font-size:16px; }
-.grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-label { display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--muted); }
-input { padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:rgba(0,0,0,.25); color:var(--text); outline:none; }
-input:focus { border-color: rgba(78,161,255,.8); }
-.row { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
-button { padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:var(--accent); color:#06101f; font-weight:700; cursor:pointer; }
-button:hover { filter:brightness(1.05); }
-button.ghost { background:transparent; color:var(--text); }
-.response { background:rgba(0,0,0,.25); border:1px solid rgba(255,255,255,.08); border-radius:12px; padding:12px; min-height:140px; white-space:pre-wrap; }
-.response.small { min-height:90px; }
-.menu { margin-top:12px; }
-.menuTitle { color:var(--muted); font-size:12px; margin-bottom:8px; }
-.options { display:flex; flex-wrap:wrap; gap:8px; }
-.opt { background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.10); padding:8px 10px; border-radius:12px; cursor:pointer; font-size:13px; }
-.opt:hover { border-color: rgba(78,161,255,.7); }
-.hint { margin-top:10px; color:var(--muted); font-size:12px; }
-code { color:#d7e7ff; }
+/* Angelopp USSD Tester – readable dark cockpit */
 
-/* --- Panels --- */
+:root{
+  --bg:#0b1220;
+  --card:#0f1b33;
+  --card2:#0c162c;
+  --text:#e7eefc;
+  --muted:#9bb0d2;
+  --line:rgba(255,255,255,.10);
+  --btn:#2e6bff;
+  --btn2:#1d3a7a;
+  --white:#ffffff;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;
+  background:linear-gradient(180deg,#070c16, var(--bg));
+  color:var(--text);
+}
+
+.wrap{max-width:1200px;margin:20px auto;padding:0 14px}
+
+.top{
+  display:flex;gap:18px;justify-content:space-between;align-items:flex-end;
+  padding:14px 16px;margin-bottom:12px;
+  border:1px solid var(--line);border-radius:14px;
+  background:linear-gradient(180deg,var(--card2),var(--card));
+}
+
+.h1{font-size:22px;font-weight:800;letter-spacing:.2px}
+.sub{color:var(--muted);margin-top:4px}
+
+.status{
+  display:grid;gap:4px;
+  font-size:13px;color:var(--muted);
+}
+.status span{color:var(--text);font-weight:700}
+
+.card{
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:linear-gradient(180deg,var(--card2),var(--card));
+  padding:14px 16px;
+  margin:12px 0;
+}
+
+h2{margin:0 0 10px 0;font-size:16px}
+
+.grid{
+  display:grid;
+  grid-template-columns:repeat(4, minmax(0,1fr));
+  gap:10px;
+}
+@media (max-width: 900px){
+  .grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+label{display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:12px}
+
+input{
+  padding:10px 10px;
+  border-radius:12px;
+  border:1px solid var(--line);
+  background:rgba(0,0,0,.25);
+  color:var(--text);
+  outline:none;
+}
+input:focus{border-color:rgba(46,107,255,.6)}
+
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px}
+
+.btn{
+  border:1px solid rgba(255,255,255,.14);
+  background:rgba(255,255,255,.06);
+  color:var(--text);
+  padding:10px 12px;
+  border-radius:12px;
+  cursor:pointer;
+  font-weight:700;
+}
+.btn:hover{background:rgba(255,255,255,.10)}
+.btn.primary{
+  background:linear-gradient(180deg,rgba(46,107,255,.95),rgba(29,58,122,.95));
+  border-color:rgba(46,107,255,.55);
+}
+.btn.small{padding:8px 10px;font-size:13px}
+.btn.chip{font-weight:800}
+
+.pre{
+  margin:0;
+  padding:12px;
+  border:1px solid var(--line);
+  border-radius:12px;
+  background:rgba(0,0,0,.25);
+  color:var(--text);
+  white-space:pre-wrap;
+}
+
+.hint{margin-top:10px;color:var(--muted);font-size:13px}
+.hint code{color:var(--text);font-weight:800}
+
+.clicks{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+
+.pill{
+  padding:6px 10px;border-radius:999px;
+  background:rgba(255,255,255,.08);
+  border:1px solid rgba(255,255,255,.14);
+  color:var(--muted);font-size:12px;font-weight:800;
+}
+
 .panels{
   display:grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns:repeat(3, minmax(0,1fr));
   gap:12px;
-  margin: 10px 0 18px;
+  margin-top:12px;
 }
+@media (max-width: 1000px){
+  .panels{grid-template-columns:1fr}
+}
+
 .panel{
-  border:1px solid #e5e5e5;
-  border-radius:10px;
+  border:1px solid rgba(255,255,255,.14);
+  border-radius:14px;
+  background:rgba(255,255,255,.04);
+  padding:12px;
+  min-height:140px;
+}
+
+.panelTitle{font-weight:900;margin-bottom:10px}
+.panelBody{color:var(--text)}
+
+.item{
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:12px;
   padding:10px;
-  background:#fafafa;
+  margin-top:10px;
+  background:rgba(0,0,0,.18);
 }
-.panel pre{
-  margin:0;
-  white-space:pre-wrap;
+
+.tag{
+  display:inline-block;
+  padding:2px 8px;border-radius:999px;
+  border:1px solid rgba(255,255,255,.18);
+  background:rgba(255,255,255,.06);
+  color:var(--muted);
   font-size:12px;
-  line-height:1.35;
+  margin-left:6px;
 }
+
+.muted{color:var(--muted);font-size:13px;margin-top:6px}
