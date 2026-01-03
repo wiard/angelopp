@@ -2284,6 +2284,22 @@ def handle_my_channel(raw: str, phone: str) -> str:
 # -----------------------------
 # New handle_ussd: onboarding gate first, then existing logic
 # -----------------------------
+
+
+def handle_customer_service_1(raw: str, phone: str, session_id: str):
+    """
+    Compatibility wrapper for Customer menu option 1 (Find a Rider).
+    Called from router as: handle_customer_service_1(raw=raw, phone=phone, session_id=session_id)
+    """
+    parts = (raw or "").split("*")
+    # Normalize: if user pressed "1" we still want to route into Find Rider
+    # handle_find_rider expects parts like ["1"] / ["1","..."]
+    try:
+        return handle_find_rider(parts, session_id=session_id, phone=phone)
+    except Exception as e:
+        print("[USSD][EXC] handle_customer_service_1 failed", {"phone": phone, "raw": raw, "err": str(e)}, flush=True)
+        return ("END System error. Please try again.", 200)
+
 def handle_ussd(session_id: str, phone_number: str, text: str):
     # Normalize inputs (Africa's Talking sometimes sends leading spaces)
     session_id = (session_id or '').strip()
@@ -2297,6 +2313,11 @@ def handle_ussd(session_id: str, phone_number: str, text: str):
     raw = (text or "").strip()
 
     
+
+
+    # Always have parts/last available (prevents crashes)
+    parts = raw.split("*") if raw else []
+    last = (parts[-1] if parts else "").strip()
 
     parts = raw.split("*") if raw else []
     last = (parts[-1] if parts else "").strip()
