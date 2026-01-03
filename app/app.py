@@ -85,10 +85,9 @@ ensure_public_policy()
 # -----------------------------
 @app.route("/ussd", methods=["POST"])
 def ussd():
-    session_id = request.form.get("sessionId", "") or ""
-    phone_number = request.form.get("phoneNumber", "") or ""
-    text = request.form.get("text", "") or ""
-
+    session_id = (request.form.get("sessionId", "") or "").strip()
+    phone_number = (request.form.get("phoneNumber", "") or "").strip()
+    text = (request.form.get("text", "") or "").strip()
     try:
         rv = handle_ussd(session_id=session_id, phone_number=phone_number, text=text)
 

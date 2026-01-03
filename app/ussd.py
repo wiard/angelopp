@@ -232,6 +232,92 @@ def connect_db():
     return conn
 
 
+### DELIVERY_STATUS_HELPERS_V1 ###
+def set_delivery_offer(delivery_id: int, rider_phone: str) -> None:
+    con = connect_db()
+    cur = con.cursor()
+    cur.execute("""
+        UPDATE delivery_requests
+        SET assigned_rider_phone=?,
+            status='offered',
+            updated_at=datetime('now')
+        WHERE id=?
+    """, (rider_phone or "", int(delivery_id)))
+    con.commit()
+    con.close()
+
+def list_offered_deliveries_for_rider(rider_phone: str, limit: int = 5):
+    con = connect_db()
+    cur = con.cursor()
+    cur.execute("""
+        SELECT id, source_type, source_phone,
+               pickup_village, pickup_landmark,
+               dropoff_village, dropoff_landmark,
+               note, status, created_at
+        FROM delivery_requests
+        WHERE status='offered'
+          AND assigned_rider_phone=?
+        ORDER BY id DESC
+        LIMIT ?
+    """, (rider_phone or "", int(limit)))
+    rows = cur.fetchall()
+    con.close()
+    return rows
+
+def list_my_active_deliveries(rider_phone: str, limit: int = 5):
+    con = connect_db()
+    cur = con.cursor()
+    cur.execute("""
+        SELECT id, source_type, source_phone,
+               pickup_village, pickup_landmark,
+               dropoff_village, dropoff_landmark,
+               note, status, created_at
+        FROM delivery_requests
+        WHERE assigned_rider_phone=?
+          AND status IN ('accepted','picked_up')
+        ORDER BY id DESC
+        LIMIT ?
+    """, (rider_phone or "", int(limit)))
+    rows = cur.fetchall()
+    con.close()
+    return rows
+
+def set_delivery_status(delivery_id: int, status: str, rider_phone: str = "") -> None:
+    # status must be one of accepted/picked_up/delivered/cancelled
+    con = connect_db()
+    cur = con.cursor()
+    if rider_phone:
+        cur.execute("""
+            UPDATE delivery_requests
+            SET status=?, updated_at=datetime('now')
+            WHERE id=? AND assigned_rider_phone=?
+        """, (status, int(delivery_id), rider_phone))
+    else:
+        cur.execute("""
+            UPDATE delivery_requests
+            SET status=?, updated_at=datetime('now')
+            WHERE id=?
+        """, (status, int(delivery_id)))
+    con.commit()
+    con.close()
+
+def get_delivery(delivery_id: int):
+    con = connect_db()
+    cur = con.cursor()
+    cur.execute("""
+        SELECT id, source_type, source_phone,
+               pickup_village, pickup_landmark,
+               dropoff_village, dropoff_landmark,
+               note, status, assigned_rider_phone, created_at
+        FROM delivery_requests
+        WHERE id=?
+    """, (int(delivery_id),))
+    row = cur.fetchone()
+    con.close()
+    return row
+
+
+
 ### DELIVERY_REQUEST_HELPERS_V1 ###
 def _db_connect():
     # Prefer environment DB if present, else fall back to DB_PATH
@@ -267,6 +353,45 @@ def create_delivery_request(source_type: str, source_phone: str,
 
 import re
 import sqlite3
+
+def phone_variants(phone: str):
+    """Return a small set of normalized phone variants to survive '+', whitespace, etc."""
+    p = (phone or "").strip()
+    d = p.lstrip("+")
+    out = []
+    for x in [p, d, ("+" + d if d else "")]:
+        if x and x not in out:
+            out.append(x)
+    return out
+
+
+def _get_user_role_db(phone: str):
+    """Return role from user_roles table, trying phone variants (+ / no +)."""
+    try:
+        conn = _db()
+        cur = conn.cursor()
+        for ph in phone_variants(phone):
+            cur.execute("SELECT role FROM user_roles WHERE phone=? LIMIT 1", (ph,))
+            row = cur.fetchone()
+            if row:
+                try:
+                    return (row["role"] if isinstance(row, dict) or hasattr(row, "__getitem__") else row[0]) or ""
+                except Exception:
+                    return row[0] if row else ""
+        return ""
+    except Exception:
+        return ""
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def _is_onboarded_db(phone: str) -> bool:
+    """User is considered onboarded if they exist in user_roles."""
+    return bool((_get_user_role_db(phone) or "").strip())
+
+
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
@@ -1511,7 +1636,7 @@ def nearest_drivers_screen(phone: str, village: str, landmark: str, limit: int =
 
 def handle_ussd_core(session_id: str, phone_number: str, text: str) -> Tuple[str, int]:
     """
-    Africa's Talking POST form fields:
+    Africa Talking POST form fields:
       sessionId, phoneNumber, text
     Must return (body, http_code).
     Body MUST start with CON or END.
@@ -2160,18 +2285,31 @@ def handle_my_channel(raw: str, phone: str) -> str:
 # New handle_ussd: onboarding gate first, then existing logic
 # -----------------------------
 def handle_ussd(session_id: str, phone_number: str, text: str):
-    phone = (phone_number or "").strip()
+    # Normalize inputs (Africa's Talking sometimes sends leading spaces)
+    session_id = (session_id or '').strip()
+    phone_number = (phone_number or '').strip()
+    text = (text or '').strip()
+    # Normalize phone early (avoid leading spaces / missing '+')
+    if "normalize_phone" in globals():
+        phone = normalize_phone(phone_number)
+    else:
+        phone = (phone_number or "").strip()
     raw = (text or "").strip()
 
     
 
+### EARLY_CHOOSE_SERVICE_INTERCEPT_V1 ###
+    # Hard-safe intercept for option 1 (Choose service) BEFORE any deeper logic.
+    # This prevents crashes if later branches assume state that isn't set yet.
+### /EARLY_CHOOSE_SERVICE_INTERCEPT_V1 ###
+
     # BIZ_BACK_TO_ROOT_V1: ensure businesses back-to-root never hits legacy directory
     if raw == "2*0":
         try:
-            return handle_ussd(session_id=session_id, phone_number=phone_number, text="")
+            return handle_ussd(session_id=session_id, phone_number=phone, text="")
         except Exception:
             # last resort: behave like top-level root
-            return handle_ussd(session_id=session_id, phone_number=phone_number, text="")
+            return handle_ussd(session_id=session_id, phone_number=phone, text="")
 # 1) If onboarding not complete, return onboarding screens
     resp = onboarding.onboarding_response(session_id=session_id, phone=phone, text=raw)
     if resp is not None:
@@ -2184,345 +2322,110 @@ def handle_ussd(session_id: str, phone_number: str, text: str):
         prefs = {"role": "customer", "area_type": "village", "landmark": "Church"}
 
     role = (prefs.get("role") or "customer").strip().lower()
+    # If role wasn't stored in prefs (or prefs fallback), derive from user_roles
+    rdb = (_get_user_role_db(phone) or '').strip().lower()
+    if rdb in ('provider','customer','traveler'):
+        role = rdb
     area = (prefs.get("area_type") or "village").strip()
     village = get_pref_village(phone, fallback="Church")
     landmark = (prefs.get("landmark") or "").strip()
 
 
 ### FORCE_ROLE_HOME_AND_SERVICE_1 ###
+
+### CUSTOMER_DELIVERY_OFFER_WIRING_V1 ###
+    # --- Customer Delivery: selecting a rider from nearest list (demo mapping for now) ---
+    # After customer did 1*2 (Delivery), they see nearest riders list.
+    # Here we accept: 1*2*<n> to OFFER the latest 'new' delivery request to that rider.
+    if role == "customer" and raw.startswith("1*2*"):
+        parts = raw.split("*")
+        # 1*2*<n>
+        if len(parts) >= 3:
+            sel = parts[2].strip()
+            if sel == "0":
+                return handle_ussd(session_id=session_id, phone_number=phone, text="")
+            if sel.isdigit():
+                n = int(sel)
+                demo_riders = {1:"+254700000003", 2:"+254700000004", 3:"+254700000002"}
+                rider_phone = demo_riders.get(n, "")
+                if not rider_phone:
+                    return ("END Invalid rider selection.", 200)
+
+                # find latest delivery request by this customer that is still 'new'
+                con = connect_db()
+                cur = con.cursor()
+                cur.execute("""
+                    SELECT id FROM delivery_requests
+                    WHERE source_type='customer'
+                      AND source_phone=?
+                      AND status='new'
+                    ORDER BY id DESC
+                    LIMIT 1
+                """, (phone,))
+                row = cur.fetchone()
+                con.close()
+                if not row:
+                    return ("END No active delivery request found.", 200)
+
+                did = int(row[0])
+                set_delivery_offer(did, rider_phone)
+                return (f"END Delivery offered to rider {rider_phone}.", 200)
+
     # Role Home + Customer option 1 (Choose service) MUST be handled here.
     # This block runs after prefs/role/village/landmark are known.
 
     if raw == "":
-        menu = (
-            "CON Customer (village: " + (village or "Church") + ")\n"
-            "1. Find a Rider ->\n"
-            "2. Local Businesses\n"
-            "3. Register (Rider / Business)\n"
-            "4. Change my place\n"
-            "5. Sacco Line ->\n"
-            "6. Listen (channels)\n"
-            "7. My channel\n"
-            "8. Travel ->\n"
-            "9. Switch role\n"
-            "0. Exit"
-        )
-        return (menu, 200)
 
-    # Customer option 1: Choose service (Ride / Delivery)
-    if role == "customer" and raw == "1":
-        return ("CON Choose service:\n"
-                "1. Ride (Rider)\n"
-                "2. Delivery\n"
-                "0. Back", 200)
-
-    if role == "customer" and raw.startswith("1*"):
-        parts1 = raw.split("*")
-        sub = parts1[1].strip() if len(parts1) > 1 else ""
-        if sub == "0":
-            return handle_ussd(session_id=session_id, phone_number=phone, text="")
-
-        # Ride or Delivery: for now both use the rider engine; intent can be stored later
-        if sub == "1":
-            return handle_find_rider(["1"], session_id, phone)
-        if sub == "2":
-            # Delivery: create a real request row (minimal v1) then reuse rider engine
-            try:
-                create_delivery_request("customer", phone, village, landmark, "", "", "")
-            except Exception as e:
-                print("[DELIVERY][EXC] create_delivery_request failed", {"phone": phone, "village": village, "landmark": landmark, "err": str(e)}, flush=True)
-            return handle_find_rider(["1"], session_id, phone)
-### DELIVERY_FLOW_V1 ###
-def _delivery_dropoff_menu() -> str:
-    return (
-        "CON Delivery: choose drop-off\n"
-        "1. Main market\n"
-        "2. Hospital\n"
-        "3. Bus station\n"
-        "4. School\n"
-        "9. Type my own\n"
-        "0. Back"
-    )
-
-def _delivery_dropoff_from_choice(choice: str) -> str:
-    return {
-        "1": "Main market",
-        "2": "Hospital",
-        "3": "Bus station",
-        "4": "School",
-    }.get((choice or "").strip(), "")
-
-    ### FINAL_HANDLE_USSD_FALLBACK_V1 ###
-    # Absolute safety: never let handle_ussd fall through to None.
-    try:
-        v = get_pref_village(phone, fallback="Church")
-    except Exception:
-        v = "Church"
-
-    menu = (
-        "CON Customer (village: %s)\n"
-        "1. Find a Rider ->\n"
-        "2. Local Businesses\n"
-        "3. Register (Rider / Business)\n"
-        "4. Change my place\n"
-        "5. Sacco Line ->\n"
-        "6. Listen (channels)\n"
-        "7. My channel\n"
-        "8. Travel ->\n"
-        "9. Switch role\n"
-        "0. Exit"
-    ) % v
-    return (menu, 200)
-
-def handle_delivery_flow(raw: str, phone: str, session_id: str):
-    # raw starts with "1*2" (Customer -> Find a Rider -> Delivery)
-    # Uses customer's saved context for pickup (village+landmark).
-    try:
-        village, landmark = get_customer_context(phone)
-    except Exception:
-        village, landmark = ("Bumala", "Church")
-
-    parts = raw.split("*") if raw else []
-    # parts: ["1","2", ...]
-    # Step A: choose dropoff
-    if raw == "1*2":
-        return (_delivery_dropoff_menu(), 200)
-
-    # Back to choose service
-    if raw == "1*2*0" or raw.startswith("1*2*0*"):
-        return ("CON Choose service:\n1. Ride (Rider)\n2. Delivery\n0. Back", 200)
-
-    # Typed dropoff
-    if raw == "1*2*9":
-        return ("CON Type drop-off landmark:\n(Example: 'Water Pump', 'Port Gate')", 200)
-
-    dropoff = ""
-    note = ""
-
-    # typed path: 1*2*9*<dropoff>
-    if len(parts) >= 4 and parts[2] == "9":
-        dropoff = (parts[3] or "").strip()
-        if not dropoff:
-            return ("CON Type drop-off landmark:", 200)
-        # next: ask note?
-        if len(parts) == 4:
-            return ("CON Add note?\n1. Yes\n2. No\n0. Back", 200)
-
-        # note decision
-        if len(parts) >= 5:
-            dec = (parts[4] or "").strip()
-            if dec == "0":
-                return (_delivery_dropoff_menu(), 200)
-            if dec == "2":
-                rid = create_delivery_request("customer", phone, village, landmark, village, dropoff, "")
-                # After creating request, show riders (same engine)
-                return (ussd_response(nearest_drivers_screen(phone=phone, village=village, landmark=landmark)), 200)
-            if dec == "1":
-                if len(parts) == 5:
-                    return ("CON Type note (optional):\n(Example: 'Small parcel', 'Call on arrival')", 200)
-                note = (parts[5] or "").strip() if len(parts) >= 6 else ""
-                rid = create_delivery_request("customer", phone, village, landmark, village, dropoff, note)
-                return (ussd_response(nearest_drivers_screen(phone=phone, village=village, landmark=landmark)), 200)
-
-    # choice path: 1*2*<n>
-    if len(parts) >= 3 and parts[2] in ("1","2","3","4"):
-        dropoff = _delivery_dropoff_from_choice(parts[2])
-        # ask note?
-        if len(parts) == 3:
-            return ("CON Add note?\n1. Yes\n2. No\n0. Back", 200)
-
-        dec = (parts[3] or "").strip() if len(parts) >= 4 else ""
-        if dec == "0":
-            return (_delivery_dropoff_menu(), 200)
-        if dec == "2":
-            rid = create_delivery_request("customer", phone, village, landmark, village, dropoff, "")
-            return (ussd_response(nearest_drivers_screen(phone=phone, village=village, landmark=landmark)), 200)
-        if dec == "1":
-            if len(parts) == 4:
-                return ("CON Type note (optional):\n(Example: 'Small parcel', 'Call on arrival')", 200)
-            note = (parts[4] or "").strip() if len(parts) >= 5 else ""
-            rid = create_delivery_request("customer", phone, village, landmark, village, dropoff, note)
-            return (ussd_response(nearest_drivers_screen(phone=phone, village=village, landmark=landmark)), 200)
-
-    # fallback: show menu again
-    return (_delivery_dropoff_menu(), 200)
-
-    # --- Role Home (single source of truth) ---
-    if raw == "":
-        if role == "customer":
-            menu = """Customer (village: {village})
-1. Find a Rider ->
-2. Local Businesses
-3. Register (Rider / Business)
-4. Change my place
-5. Sacco Line ->
-6. Listen (channels)
-7. My channel
-8. Travel ->
-9. Switch role
-0. Exit"""
-            return ("CON " + menu.format(village=village), 200)
-        else:
-            menu = """Service Provider
-1. My profile (register/update)
-2. My services (add/remove)
-3. Update my place
-4. Incoming requests ->
-9. Switch role
-0. Exit"""
-            return ("CON " + menu, 200)
-
-    # --- Customer option 1: Choose service (Ride / Delivery) ---
-    if role == "customer" and raw == "1":
-        return ("CON Choose service:\n"
-                "1. Ride (Rider)\n"
-                "2. Delivery\n"
-                "0. Back", 200)
-
-    if role == "customer" and raw.startswith("1*"):
-        parts1 = raw.split("*")
-        sub = parts1[1].strip() if len(parts1) > 1 else ""
-        if sub == "0":
-            return handle_ussd(session_id=session_id, phone_number=phone, text="")
-        if sub in ("1","2"):
-            # intent = "delivery" if sub == "2" else "ride"
-            return handle_find_rider(["1"], session_id, phone)
-    ### ROLE_HOME_MENU_RESTORED ###
-    # Role-Home root screen (shows village context)
-
-    # Exit if user explicitly chooses 0 at top-level
-    last = raw.split("*")[-1] if raw else ""
-### DELIVERY_CUSTOMER_FLOW ###
-
-    ### FINAL_HANDLE_USSD_FALLBACK ###
-    # If we ever fall through here, show the role home instead of returning None.
-    try:
-        phone = (phone_number or '')
-        # Prefer the new role-home screen by reusing existing logic if available:
-        # - If there is a 'root_menu' function, use it
-        if 'root_menu' in globals():
-            return ('CON ' + str(root_menu(phone)).lstrip('CON ').lstrip('END '), 200)
-    except Exception:
-        pass
-    return ('CON Customer\n1. Find a Rider ->\n2. Local Businesses\n3. Register (Rider / Business)\n4. Change my place\n5. Sacco Line ->\n6. Listen (channels)\n7. My channel\n8. Travel ->\n9. Switch role\n0. Exit', 200)
-
-def _customer_choose_service_screen() -> str:
-    return ussd_response("\n".join([
-        "CON Choose service:",
-        "1. Ride (Rider)",
-        "2. Delivery",
-        "0. Back",
-    ]))
-
-def _customer_delivery_dropoff_screen() -> str:
-    return ussd_response("\n".join([
-        "CON Delivery dropoff:",
-        "1. Bus station",
-        "2. Main market",
-        "3. Hospital",
-        "4. Mall/Center",
-        "9. Type my own",
-        "0. Back",
-    ]))
-
-def _landmark_choice_to_name(k: str) -> str:
-    return {"1":"Bus station","2":"Main market","3":"Hospital","4":"Mall/Center"}.get(k, "")
-
-def handle_customer_service_1(raw: str, phone: str, session_id: str):
-    parts = raw.split("*")
-
-    # get customer location
-    try:
-        village, landmark = get_customer_context(phone)
-    except Exception:
-        village, landmark = ("Bumala", "Church")
-
-    # 1 -> choose service
-    if raw == "1":
-        return (_customer_choose_service_screen(), 200)
-
-    # 1*0 -> back to root (empty text)
-    if len(parts) >= 2 and parts[1] == "0":
-        return handle_ussd(session_id=session_id, phone_number=phone, text="")
-
-    # 1*1 -> ride (existing rider list)
-    if len(parts) >= 2 and parts[1] == "1":
-        return (ussd_response(nearest_drivers_screen(phone=phone, village=village, landmark=landmark)), 200)
-
-    # 1*2 -> delivery -> ask dropoff
-    if len(parts) == 2 and parts[1] == "2":
-        return (_customer_delivery_dropoff_screen(), 200)
-
-    # 1*2*X -> create delivery + show same rider list
-    if len(parts) >= 3 and parts[1] == "2":
-        if parts[2] == "0":
-            return (_customer_choose_service_screen(), 200)
-
-        if parts[2] == "9":
-            # typed landmark
-            if len(parts) == 3:
-                return (ussd_response("CON Type dropoff landmark:\n0. Back"), 200)
-            typed = (parts[3] or "").strip()
-            if typed == "":
-                return (ussd_response("CON Type dropoff landmark:\n0. Back"), 200)
-            create_delivery_request("customer", phone, village, landmark, village, typed, "")
-            return (ussd_response(nearest_drivers_screen(phone=phone, village=village, landmark=landmark)), 200)
-
-        dropoff = _landmark_choice_to_name(parts[2])
-        if dropoff:
-            create_delivery_request("customer", phone, village, landmark, village, dropoff, "")
-            return (ussd_response(nearest_drivers_screen(phone=phone, village=village, landmark=landmark)), 200)
-
-    # fallback
-    return (ussd_response(nearest_drivers_screen(phone=phone, village=village, landmark=landmark)), 200)
-
-
-    if raw == "":
         title = "Customer" if role == "customer" else "Service Provider"
-        menu = f"""{title} (village: {village})
-1. Find a Rider ->
-2. Local Businesses
-3. Register (Rider / Business)
-4. Change my place
-5. Sacco Line ->
-6. Listen (channels)
-7. My channel
-8. Travel ->
-9. Switch role
-0. Exit"""
+
+        menu = (
+
+            title + " (village: " + str(village) + ")\n"
+
+            + "1. Find a Rider ->\n"
+
+            + "2. Local Businesses\n"
+
+            + "3. Register (Rider / Business)\n"
+
+            + "4. Change my place\n"
+
+            + "5. Sacco Line ->\n"
+
+            + "6. Listen (channels)\n"
+
+            + "7. My channel\n"
+
+            + "8. Travel ->\n"
+
+            + "9. Switch role\n"
+
+            + "0. Exit"
+
+        )
+
         return ("CON " + menu, 200)
-
-    
-
 ### DELIVERY_WIRING_CUSTOMER_OPTION1 ###
+
+### PROVIDER_INCOMING_REQUESTS_WIRING_V1 ###
+    # Provider Incoming requests (option 4)
+    if role == "provider" and (raw == "4" or raw.startswith("4*")):
+        if raw == "4":
+            return ("CON Incoming requests\n1. Rider requests\n2. Delivery requests\n0. Back", 200)
+        if raw == "4*0" or raw.startswith("4*0*"):
+            return handle_ussd(session_id=session_id, phone_number=phone, text="")
+        if raw == "4*2" or raw.startswith("4*2*"):
+            return handle_provider_delivery_inbox(raw=raw, session_id=session_id, phone=phone, village=village)
+        if raw == "4*1" or raw.startswith("4*1*"):
+            return ("CON Rider requests\n(soon)\n0. Back", 200)
+        return ("CON Incoming requests\n1. Rider requests\n2. Delivery requests\n0. Back", 200)
     # Customer option 1 now shows "Choose service" (Ride / Delivery)
     if role == "customer" and (raw == "1" or raw.startswith("1*")):
         return handle_customer_service_1(raw=raw, phone=phone, session_id=session_id)
 # Intercepts (before core)
 
-    if raw == "1":
-        return ("CON Choose service:\n"
-                "1. Ride (Rider)\n"
-                "2. Delivery\n"
-                "0. Back", 200)
-
-    if raw.startswith("1*"):
-        parts1 = raw.split("*")
-        sub = parts1[1].strip() if len(parts1) > 1 else ""
-        if sub == "0":
-            # back to Role Home root
-            return handle_ussd(session_id=session_id, phone_number=phone, text="")
-        if sub in ("1","2"):
-            # Intent is available here if you want to store it later:
-            # intent = "delivery" if sub == "2" else "ride"
-            return handle_find_rider(["1"], session_id, phone)
-        return ("CON Choose service:\n"
-                "1. Ride (Rider)\n"
-                "2. Delivery\n"
-                "0. Back", 200)
-
-
-    # Channels (6/7) — handled here so core routes remain unchanged
+    
+# Channels (6/7) — handled here so core routes remain unchanged
     # Listen (channels)
     # Sacco Line (option 5)
     # Sacco Line (option 5) — handled here so core remains unchanged
@@ -2577,297 +2480,277 @@ def handle_customer_service_1(raw: str, phone: str, session_id: str):
     return handle_ussd_core(session_id=session_id, phone_number=phone_number, text=raw)
 
 
-# ============================================================
-# Travel (customer submenu) - placeholder flow
-# ============================================================
-def handle_travel(parts, session_id: str, phone: str):
+### PROVIDER_DELIVERY_INBOX_V1 ###
+def handle_provider_delivery_inbox(raw: str, session_id: str, phone: str, village: str):
     """
-    Travel submenu (Customer).
-    Uses ussd_response() so output is always CON/END compatible with Africa's Talking.
+    Provider delivery inbox + status updates.
+
     Flow:
-      8               -> menu
-      8*0             -> back to root
-      8*1             -> Plan a trip (asks From)
-      8*1*<FROM>      -> asks To
-      8*1*<FROM>*<TO> -> shows summary (placeholder)
-      8*2             -> Find transport (placeholder)
-      8*3             -> My trips (placeholder)
+      4*2                 -> list (open + my active)
+      4*2*<n>             -> details
+      4*2*<n>*1           -> accept
+      4*2*<n>*2           -> picked_up
+      4*2*<n>*3           -> delivered
+      4*2*<n>*0           -> back
     """
+    parts = (raw or "").split("*")
+    prov = normalize_phone(phone)
+    v = (village or "").strip()
+
     def _resp(body: str):
-        # Prefer the project's wrapper (adds CON/END, etc.)
         if "ussd_response" in globals():
-            return ussd_response(body), 200
-        # Fallback (shouldn't happen in your project)
-        body = body.strip("\n")
+            return (ussd_response(body), 200)
+        body = (body or "").strip("\n")
         if not (body.startswith("CON ") or body.startswith("END ")):
             body = "CON " + body
-        return body, 200
+        return (body, 200)
 
-    # 8 -> show menu
-    if len(parts) == 1:
-        return _resp(
-            "Travel\n"
-            "1. Plan a trip\n"
-            "2. Find transport\n"
-            "3. My trips (soon)\n"
-            "0. Back"
-        )
-
-    choice = parts[1]
-
-    # Back -> root menu (role-aware root will be applied there)
-    if choice == "0":
-        if "handle_ussd_core" in globals():
-            return handle_ussd_core(session_id=session_id, phone_number=phone, text="")
-        return _resp("Back\n0. Exit")
-
-    # 1) Plan a trip (simple wizard)
-    if choice == "1":
-        if len(parts) == 2:
-            return _resp("Plan a trip\nFrom (type a place):\n0. Back")
-        if len(parts) == 3:
-            frm = parts[2].strip()[:32]
-            return _resp(f"Plan a trip\nFrom: {frm}\nTo (type a place):\n0. Back")
-        if len(parts) >= 4:
-            frm = parts[2].strip()[:32]
-            to = parts[3].strip()[:32]
-            return _resp(
-                "Trip draft\n"
-                f"From: {frm}\n"
-                f"To: {to}\n"
-                "Next: we can add date/time + budget + save it.\n"
-                "0. Back"
-            )
-
-    # 2) Find transport (placeholder)
-    if choice == "2":
-        return _resp(
-            "Find transport (soon)\n"
-            "1. Boda / Rider\n"
-            "2. Tuktuk\n"
-            "3. Bus\n"
-            "0. Back"
-        )
-
-    # 3) My trips (placeholder)
-    if choice == "3":
-        return _resp("My trips (soon)\n0. Back")
-
-    return _resp("Invalid option.\n0. Back")
-
-
-
-
-# ============================================================
-# Businesses (robust v2) - avoids 500s, uses providers table if present
-# ============================================================
-
-
-# ============================================================
-# Change place V3 (safe) — persists user_prefs.village
-# ============================================================
-def handle_change_place_v3(parts, phone: str):
-    # parts[0] == "4"
-    if parts == ["4"]:
-        return ussd_response(
-            "CON Choose your area:\n"
-            "1. Village\n"
-            "2. Town/City\n"
-            "3. Airport\n"
-            "0. Back"
-        ), 200
-
-    if len(parts) >= 2 and parts[1] == "1":
-        # Village flow
-        if len(parts) == 2:
-            return ussd_response(
-                "CON Choose your village:\n"
-                "1. Bumala\n"
-                "2. Butula\n"
-                "3. Busia\n"
-                "0. Back"
-            ), 200
-
-        # Pick village
-        choice = parts[2]
-        if choice == "0":
-            return ussd_response(main_menu()), 200
-
-        # Map choice -> name
-        v = None
+    def _inbox_rows(limit: int = 9):
+        conn = _db()
         try:
-            v = village_name_from_choice(choice)
-        except Exception:
-            pass
-        if not v:
-            # fallback hard-map
-            v = {"1": "Bumala", "2": "Butula", "3": "Busia"}.get(choice)
-
-        if not v:
-            return ussd_response("CON Invalid option.\n0. Back"), 200
-
-        # Persist
-        try:
-            conn = db()
-            ensure_user_prefs(conn)
             cur = conn.cursor()
-            # Upsert (SQLite)
-            cur.execute("""
-                INSERT INTO user_prefs (phone, village, updated_at)
-                VALUES (?, ?, datetime('now'))
-                ON CONFLICT(phone) DO UPDATE SET
-                    village=excluded.village,
-                    updated_at=datetime('now')
-            """, (normalize_phone(phone), v))
-            conn.commit()
-        except Exception:
-            # never break flow
-            pass
+            cur.execute(
+                """
+                SELECT *
+                FROM delivery_requests
+                WHERE (
+                    pickup_village = ?
+                    AND status IN ('new','open','requested','pending','offered')
+                    AND COALESCE(assigned_rider_phone,'') = ''
+                )
+                OR (
+                    pickup_village = ?
+                    AND COALESCE(assigned_rider_phone,'') = ?
+                    AND status IN ('accepted','picked_up')
+                )
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (v, v, prov, int(limit)),
+            )
+            return cur.fetchall() or []
+        finally:
+            try: conn.close()
+            except Exception: pass
 
-        return ussd_response(f"CON Location set ✓\nVillage: {v}\n0. Back"), 200
-
-    if len(parts) >= 2 and parts[1] == "2":
-        return ussd_response("CON Town/City (soon)\n0. Back"), 200
-
-    if len(parts) >= 2 and parts[1] == "3":
-        return ussd_response("CON Airport (soon)\n0. Back"), 200
-
-    if len(parts) >= 2 and parts[1] == "0":
-        return ussd_response(main_menu()), 200
-
-    return ussd_response("CON Invalid option.\n0. Back"), 200
-def handle_businesses_v2(parts, session_id: str, phone: str):
-    """
-    Businesses flow (safe, never 500):
-      2                  -> choose village
-      2*<vchoice>         -> list in village
-      2*<vchoice>*<idx>   -> detail
-    vchoice can be '1/2/3' or a village name.
-    """
-    try:
-        if not parts or parts[0] != "2":
-            return "CON Invalid option.\n0. Back"
-
-        # 2 -> village menu
-        if len(parts) == 1:
-            lines = ["CON Businesses in which village?"]
-            for code, name in _biz_village_pairs():
-                # ensure codes are 1..N as USSD expects
-                # if code isn't numeric, still display sequentially
-                lines.append(f"{code}. {name}")
-            lines.append("0. Back")
-            return "\n".join(lines)
-
-        # back
-        if parts[1] == "0":
-            return "CON " + main_menu(phone)
-
-        v = _biz_village_from_choice(parts[1])
-        if not v:
-            return "CON Invalid village.\n0. Back"
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT phone, name, COALESCE(current_landmark,'') AS landmark
-            FROM providers
-            WHERE lower(trim(provider_type))='business'
-              AND trim(village)=trim(?)
-            ORDER BY name
-            LIMIT 20
-        """, (v,))
-        rows = cur.fetchall() or []
-
-        # 2*<v> -> list
-        if len(parts) == 2:
-            lines = [f"CON Businesses in {v}"]
-            if not rows:
-                lines.append("No businesses yet.")
-                lines.append("0. Back")
-                return "\n".join(lines)
-            for i, r in enumerate(rows, start=1):
-                nm = (r["name"] if hasattr(r, "__getitem__") else r[1]) or "Business"
-                lines.append(f"{i}. {nm} ->")
-            lines.append("0. Back")
-            return "\n".join(lines)
-
-        # 2*<v>*<idx>
-        idx_raw = (parts[2] or "").strip() if len(parts) >= 3 else ""
-        if idx_raw == "0":
-            return f"CON Businesses in {v}\n0. Back"
-
+    def _get_by_id(did: int):
+        conn = _db()
         try:
-            idx = int(idx_raw) - 1
-        except Exception:
-            return "CON Invalid option.\n0. Back"
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM delivery_requests WHERE id=?", (int(did),))
+            return cur.fetchone()
+        finally:
+            try: conn.close()
+            except Exception: pass
 
-        if idx < 0 or idx >= len(rows):
-            return "CON Invalid business.\n0. Back"
+    def _set_status(did: int, new_status: str, assigned_phone: str | None = None):
+        conn = _db()
+        try:
+            cur = conn.cursor()
+            if assigned_phone is None:
+                cur.execute(
+                    "UPDATE delivery_requests SET status=?, updated_at=datetime('now') WHERE id=?",
+                    (new_status, int(did)),
+                )
+            else:
+                cur.execute(
+                    "UPDATE delivery_requests SET status=?, assigned_rider_phone=?, updated_at=datetime('now') WHERE id=?",
+                    (new_status, assigned_phone, int(did)),
+                )
+            conn.commit()
+        finally:
+            try: conn.close()
+            except Exception: pass
 
-        r = rows[idx]
-        bphone = r["phone"] if hasattr(r, "__getitem__") else r[0]
-        bname  = r["name"] if hasattr(r, "__getitem__") else r[1]
-        blm    = r["landmark"] if hasattr(r, "__getitem__") else r[2]
+    # list
+    if raw == "4*2":
+        try:
+            rows = _inbox_rows(limit=9)
+        except Exception as e:
+            print("[DELIVERY][EXC] inbox list failed", {"phone": phone, "village": v, "err": str(e)}, flush=True)
+            return _resp("Delivery requests\nSystem error\n0. Back")
 
-        lines = ["CON Business", f"Name: {bname}", f"Phone: {bphone}"]
-        if blm:
-            lines.append(f"Place: {blm}")
+        if not rows:
+            return _resp("Delivery requests\nNo open deliveries\n0. Back")
+
+        lines = ["Delivery requests"]
+        for idx, r in enumerate(rows, start=1):
+            did = r[0]
+            pickup_lm = (r[4] or "Unknown").strip()
+            status = (r[8] or "new").strip()
+            assigned = (r[9] or "").strip()
+            tag = "mine" if assigned and normalize_phone(assigned) == prov else ""
+            suffix = f" ({status}{', '+tag if tag else ''})"
+            lines.append(f"{idx}. #{did} from {pickup_lm}{suffix}")
         lines.append("0. Back")
-        return "\n".join(lines)
+        return _resp("\n".join(lines))
 
+    # back
+    if raw.startswith("4*2*0"):
+        return _resp("Incoming requests\n1. Rider requests\n2. Delivery requests\n0. Back")
+
+    # detail index
+    try:
+        n = int(parts[2])
     except Exception:
-        return "CON Businesses\nTemporary error.\n0. Back"
+        return _resp("Delivery requests\nInvalid choice\n0. Back")
+
+    try:
+        rows = _inbox_rows(limit=9)
+        if n < 1 or n > len(rows):
+            return _resp("Delivery requests\nInvalid choice\n0. Back")
+        delivery_id = int(rows[n - 1][0])
+        row = _get_by_id(delivery_id)
+        if not row:
+            return _resp("Delivery not found\n0. Back")
+    except Exception as e:
+        print("[DELIVERY][EXC] inbox detail failed", {"phone": phone, "village": v, "err": str(e)}, flush=True)
+        return _resp("Delivery requests\nSystem error\n0. Back")
+
+    # table schema:
+    # 0 id, 1 source_type, 2 source_phone, 3 pickup_village, 4 pickup_landmark,
+    # 5 dropoff_village, 6 dropoff_landmark, 7 note, 8 status, 9 assigned_rider_phone
+    source_type = (row[1] or "").strip()
+    source_phone = (row[2] or "").strip()
+    pickup_lm = (row[4] or "Unknown").strip()
+    drop_lm = (row[6] or "").strip() or "Unknown"
+    note = (row[7] or "").strip()
+    status = (row[8] or "new").strip()
+    assigned = (row[9] or "").strip()
+
+    action = parts[3].strip() if len(parts) >= 4 else ""
+
+    if action == "0":
+        # back to delivery list
+        try:
+            rows = get_open_delivery_requests(village=village, limit=9)
+        except Exception:
+            rows = []
+        if not rows:
+            return _resp("Delivery requests\nNo open deliveries\n0. Back")
+        lines = ["Delivery requests"]
+        for idx, r in enumerate(rows, start=1):
+            did = r[0]
+            pickup_lm = (r[4] or "Unknown").strip()
+            status2 = (r[8] or "new").strip()
+            lines.append(f"{idx}. #{did} from {pickup_lm} ({status2})")
+        lines.append("0. Back")
+        return _resp("\n".join(lines))
+    if action == "1":
+        if assigned:
+            return _resp(f"Delivery #{delivery_id}\nAlready assigned\n0. Back")
+        if status not in ("new","open","requested","pending","offered"):
+            return _resp(f"Delivery #{delivery_id}\nNot open ({status})\n0. Back")
+        _set_status(delivery_id, "accepted", assigned_phone=prov)
+        return _resp(f"Delivery #{delivery_id}\nAccepted ✓\n2. Picked up\n3. Delivered\n0. Back")
+
+    if action == "2":
+        if normalize_phone(assigned) != prov:
+            return _resp(f"Delivery #{delivery_id}\nNot yours\n0. Back")
+        if status not in ("accepted","picked_up"):
+            return _resp(f"Delivery #{delivery_id}\nCannot pick up ({status})\n0. Back")
+        _set_status(delivery_id, "picked_up")
+        return _resp(f"Delivery #{delivery_id}\nPicked up ✓\n3. Delivered\n0. Back")
+
+    if action == "3":
+        if normalize_phone(assigned) != prov:
+            return _resp(f"Delivery #{delivery_id}\nNot yours\n0. Back")
+        if status not in ("accepted","picked_up"):
+            return _resp(f"Delivery #{delivery_id}\nCannot deliver ({status})\n0. Back")
+        _set_status(delivery_id, "delivered")
+        return _resp(f"END Delivery #{delivery_id}\nDelivered ✓")
+
+    # details screen
+    lines = [
+        f"Delivery #{delivery_id}",
+        f"From: {source_type} {source_phone}",
+        f"Pickup: {pickup_lm}",
+        f"Drop: {drop_lm}",
+        f"Status: {status}",
+    ]
+    if note:
+        lines.append(f"Note: {note}")
+
+    if (not assigned) and status in ("new","open","requested","pending","offered"):
+        lines += ["1. Accept", "0. Back"]
+        return _resp("\n".join(lines))
+
+    if normalize_phone(assigned) == prov and status in ("accepted","picked_up"):
+        if status == "accepted":
+            lines += ["2. Picked up", "3. Delivered", "0. Back"]
+        else:
+            lines += ["3. Delivered", "0. Back"]
+        return _resp("\n".join(lines))
+
+    lines += ["0. Back"]
+    return _resp("\n".join(lines))
+def get_open_delivery_requests(village: str, limit: int = 5):
+    """Return open delivery requests for a village (schema-adaptive)."""
+    v = (village or "").strip()
+    conn = _db()
+    try:
+        cur = conn.cursor()
+        cols = [r[1] for r in cur.execute("PRAGMA table_info(delivery_requests);").fetchall()]
+        colset = set(cols)
+
+        # choose best available column names
+        village_col = "pickup_village" if "pickup_village" in colset else ("village" if "village" in colset else None)
+        status_col  = "status" if "status" in colset else None
+
+        assigned_col = None
+        for c in ("assigned_to","assigned_phone","assigned_provider","provider_phone"):
+            if c in colset:
+                assigned_col = c
+                break
+
+        where = []
+        params = []
+
+        if village_col:
+            where.append(f"COALESCE({village_col}, '') = ?")
+            params.append(v)
+
+        if status_col:
+            where.append(f"COALESCE({status_col}, 'new') IN ('new','open','requested','pending')")
+        # if no status col, we just list recent
+
+        if assigned_col:
+            where.append(f"(COALESCE({assigned_col}, '') = '')")
+
+        wh = (" WHERE " + " AND ".join(where)) if where else ""
+        sql = f"SELECT * FROM delivery_requests{wh} ORDER BY rowid DESC LIMIT ?"
+        params.append(int(limit))
+
+        cur.execute(sql, params)
+        return cur.fetchall() or []
+    finally:
+        try: conn.close()
+        except Exception: pass
 
 
+# Monkey-patch the public name used by app.py
 
-# -----------------------------
-# Safety wrapper: never return None from handle_ussd
-# -----------------------------
+# ------------------------------------------------------------
+# Safety wrapper (restored): never crash the Flask endpoint
+# ------------------------------------------------------------
 try:
     _angelopp_orig_handle_ussd = handle_ussd
-except NameError:
+except Exception:
     _angelopp_orig_handle_ussd = None
 
 def _angelopp_safe_handle_ussd(session_id: str, phone_number: str, text: str):
-    raw = text or ""
-    """
-    Ensures the USSD gateway never receives None.
-    Logs when None happens so we can patch the missing return path later.
-    """
+    raw = (text or "").strip()
     try:
         if _angelopp_orig_handle_ussd is None:
-            print("[USSD][BUG] handle_ussd not defined at import time", flush=True)
             return ("END System error. Please try again.", 200)
-
         rv = _angelopp_orig_handle_ussd(session_id=session_id, phone_number=phone_number, text=text)
-
         if rv is None:
-            print("[USSD][BUG] handle_ussd returned None", {'session': session_id, 'phone': phone_number, 'text': (raw or '')})
-            # Never return None to Flask — always return a real USSD screen.
-            try:
-                v = get_pref_village(phone, fallback="Church")
-            except Exception:
-                v = "Church"
-            menu = (
-                "CON Customer (village: %s)\n"
-                "1. Find a Rider ->\n"
-                "2. Local Businesses\n"
-                "3. Register (Rider / Business)\n"
-                "4. Change my place\n"
-                "5. Sacco Line ->\n"
-                "6. Listen (channels)\n"
-                "7. My channel\n"
-                "8. Travel ->\n"
-                "9. Switch role\n"
-                "0. Exit"
-            ) % v
-            return (menu, 200)
+            print("[USSD][BUG] handle_ussd returned None", {"session": session_id, "phone": phone_number, "text": raw}, flush=True)
+            return ("END System error. Please try again.", 200)
         return rv
     except Exception as e:
-        print("[USSD][EXC] exception in handle_ussd",
-              {"session": session_id, "phone": phone_number, "text": text, "err": str(e)},
-              flush=True)
+        print("[USSD][EXC] exception in handle_ussd", {"session": session_id, "phone": phone_number, "text": raw, "err": str(e)}, flush=True)
         return ("END System error. Please try again.", 200)
 
-# Monkey-patch the public name used by app.py
+
 handle_ussd = _angelopp_safe_handle_ussd
