@@ -79,7 +79,13 @@
       </details>
     </section>
 
+    
     <section class="card">
+      <h2>Role Tree</h2>
+      <div class="hint">Click a role to switch the active role for this phone (server-side). Then use the shortcut buttons or type USSD paths.</div>
+      <div id="roleTree" class="panels"></div>
+    </section>
+<section class="card">
       <h2>Debug</h2>
       <div class="row">
         <button id="btnWhoami" class="btn">Who am I?</button>
@@ -90,5 +96,13 @@
   </div>
 
   <script src="/static/tester.js"></script>
+
+    <div class="ticker" id="outixsTicker">
+      <div class="tickerLabel">OUTIXs ledger</div>
+      <div class="tickerTrack">
+        <div class="tickerText" id="outixsTickerText">loading…</div>
+      </div>
+    </div>
+
 </body>
 </html>

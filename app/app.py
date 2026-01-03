@@ -1,64 +1,182 @@
 from flask import Flask, request, send_from_directory, jsonify
+
+# --- USSD core import ---
+try:
+    from ussd import handle_ussd
+except Exception:
+    handle_ussd = None
+
+import traceback
 import sqlite3
-import hashlib
 import os
 import re
-import datetime
-from pathlib import Path
 
-from ussd import handle_ussd, normalize_phone
 
-print('[USSD] running file:', __file__, flush=True)
-
-APP_DIR = Path(__file__).resolve().parent
-PUBLIC_DIR = APP_DIR / "public"
-
+# --- Roles schema for web cockpit (simple, local) ---
 app = Flask(__name__)
+def ensure_roles_schema(db_path: str):
+    import sqlite3
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_roles (
+        phone TEXT NOT NULL,
+        primary_role TEXT NOT NULL,
+        sub_role TEXT NOT NULL DEFAULT '',
+        is_active INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (phone, primary_role, sub_role)
+    );
+    """)
+    con.commit()
+    con.close()
 
-BUMALA_DB_PATH = '/opt/angelopp/data/bumala.db'
+def set_active_role(db_path: str, phone: str, primary: str, sub: str = "", village: str = "Church") -> None:
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    # Make sure table/cols exist (safe)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_roles (
+      phone TEXT PRIMARY KEY,
+      primary_role TEXT NOT NULL DEFAULT 'customer',
+      sub_role TEXT NOT NULL DEFAULT '',
+      village TEXT NOT NULL DEFAULT 'Church',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """)
+    cur.execute("""
+    INSERT INTO user_roles(phone, primary_role, sub_role, village, updated_at)
+    VALUES(?,?,?,?,datetime('now'))
+    ON CONFLICT(phone) DO UPDATE SET
+      primary_role=excluded.primary_role,
+      sub_role=excluded.sub_role,
+      village=excluded.village,
+      updated_at=datetime('now')
+    """, (phone, primary, sub or "", village or "Church"))
+    con.commit()
+    con.close()
 
-
+def get_active_role(db_path: str, phone: str):
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    try:
+        cur.execute("SELECT primary_role, sub_role, village FROM user_roles WHERE phone=? LIMIT 1", (phone,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        primary, sub, village = row[0] or "customer", row[1] or "", row[2] or "Church"
+        return (primary, sub, village)
+    finally:
+        con.close()
 
 @app.route("/api/whoami", methods=["GET"])
+
 def whoami():
-    # returns prefs for tester UI
-    from ussd import normalize_phone, get_pref_village
-    import onboarding
+    from flask import request, jsonify
+    phone = (request.args.get("phone") or "").strip()
+    village = (request.args.get("village") or "").strip()
 
-    phone = request.args.get("phone", "") or ""
-    phone = normalize_phone(phone) or phone
+    # normalize + handling (keep + if present)
+    if phone and not phone.startswith("+") and phone.isdigit():
+        phone = "+" + phone
 
+    # Determine village: prefer explicit param; else keep current logic if you have it elsewhere
+    # (We keep your current stored village logic by asking /ussd layer indirectly is expensive; so we keep param/fallback.)
+    if not village:
+        village = "Church"
+
+    # Role selection priority:
+    # 1) active role in user_roles (web tester switch)
+    active = get_active_role(DB_PATH, phone) if phone else None
+    # 2) infer from providers table if active not set
+    inferred_primary, inferred_sub = "customer", ""
     try:
-        prefs = onboarding.get_prefs(phone) or {}
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        if phone:
+            cur.execute("SELECT provider_type FROM providers WHERE phone=? LIMIT 1", (phone,))
+            row = cur.fetchone()
+            if row:
+                ptype = (row[0] or "").strip()
+                if ptype == "rider":
+                    inferred_primary, inferred_sub = "provider", "rider"
+                elif ptype == "business":
+                    inferred_primary, inferred_sub = "provider", "business"
+        con.close()
     except Exception:
-        prefs = {}
+        pass
+    if active:
+        primary, sub, village2 = active
+        # if village param missing, take stored village
+        if not village:
+            village = village2
+    else:
+        primary, sub = (inferred_primary, inferred_sub)
+    # Capabilities per role
+    caps = []
+    if primary == "customer":
+        caps = ["home","nearest_riders","shops","listen_channels","my_channel","travel","switch_role"]
+    elif primary == "provider" and sub == "rider":
+        caps = ["home","delivery_inbox","accept_delivery","pickup","deliver","switch_role"]
+    elif primary == "provider" and sub == "business":
+        caps = ["home","shops","update_listing","switch_role"]
+    elif primary == "traveler":
+        caps = ["home","travel","switch_role"]
+    else:
+        caps = ["home","switch_role"]
 
-    role = (prefs.get("role") or "customer").strip().lower()
-    village = get_pref_village(phone, fallback="Church")
+    # USSD menu entrypoints used by the cockpit (these are shortcuts)
+    menus = {
+        "customer_home": "",
+        "provider_home": "4",
+        "provider_inbox": "4*2",
+        "nearest_riders": "1",
+        "shops": "2",
+        "listen": "6",
+        "my_channel": "7",
+        "travel": "8"
+    }
+
+    # Available roles (hierarchy) – minimal but explicit
+    available = [
+        {"primary":"customer","sub":""},
+        {"primary":"provider","sub":"rider"},
+        {"primary":"provider","sub":"business"},
+        {"primary":"traveler","sub":""},
+    ]
 
     return jsonify({
         "ok": True,
         "phone": phone,
-        "role": role,
-        "village": village,
+        "identity": {"village": village},
+        "role": {"primary": primary, "sub": sub},
+        "capabilities": caps,
+        "menus": menus,
+        "available_roles": available,
+        "db": DB_PATH,
     })
 
 
-# ---------------------------
-# Web cockpit helper endpoints
-# ---------------------------
+@app.route("/api/set_role", methods=["POST"])
+def api_set_role():
+    from flask import request, jsonify
+    village = (request.args.get("village") or request.form.get("village") or "Church").strip()
 
-def _db_path():
-    # Prefer /opt/angelopp/data/bumala.db (your current path)
-    return "/opt/angelopp/data/bumala.db"
+    phone = (request.args.get("phone") or request.form.get("phone") or "").strip()
+    primary = (request.args.get("primary") or request.form.get("primary") or "").strip()
+    sub = (request.args.get("sub") or request.form.get("sub") or "").strip()
 
-def _conn():
-    import sqlite3
-    return sqlite3.connect(_db_path())
+    village = (request.args.get("village") or request.form.get("village") or "Church").strip()
+    if phone and not phone.startswith("+") and phone.isdigit():
+        phone = "+" + phone
 
+    if not phone or not primary:
+        return jsonify({"ok": False, "error": "phone and primary are required"}), 400
+    village = (request.args.get("village") or request.form.get("village") or "Church").strip() or "Church"
+    set_active_role(DB_PATH, phone, primary, sub, village=village)
+    return jsonify({"ok": True, "phone": phone, "role": {"primary": primary, "sub": sub}})
 @app.route("/api/state", methods=["GET"])
 def api_state():
-    import sqlite3
     phone = (request.args.get("phone","") or "").strip()
     out = {"ok": True, "phone": phone, "db": _db_path(), "counts": {}, "latest": {}}
     try:
@@ -303,6 +421,37 @@ def api_state():
     return jsonify(out), 200
 
 from flask import send_from_directory
+import traceback
+
+
+
+@app.route("/api/outixs_ticker", methods=["GET"])
+def api_outixs_ticker():
+    """
+    Returns latest OUTIXs ledger events for the web ticker.
+    """
+    from flask import jsonify, request
+
+    limit = int(request.args.get("limit", "25") or "25")
+    if limit < 1: limit = 1
+    if limit > 200: limit = 200
+
+    db = _db_path()
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    cur.execute("""
+        SELECT id, created_at, phone, event_type, ref_type, ref_id, amount, note, payload_json
+        FROM outixs_events
+        ORDER BY id DESC
+        LIMIT ?
+    """, (limit,))
+    rows = [dict(r) for r in cur.fetchall()]
+    con.close()
+
+    # newest last for ticker readability
+    rows = list(reversed(rows))
+    return jsonify({"ok": True, "db": db, "events": rows})
 
 @app.route("/tester", methods=["GET"])
 def tester():
@@ -313,6 +462,7 @@ def health():
     return ("ok", 200)
 
 DB_PATH = os.environ.get("ANGELOPP_DB", "/opt/angelopp/data/bumala.db")
+ensure_roles_schema(DB_PATH)
 ANON_SALT = os.environ.get("ANGELOPP_ANON_SALT", "angelopp-public-v1")
 
 # -----------------------------
@@ -384,34 +534,28 @@ ensure_public_policy()
 def ussd():
     session_id = (request.form.get("sessionId", "") or "").strip()
     phone_number = (request.form.get("phoneNumber", "") or "").strip()
-    text = (request.form.get("text", "") or "").strip()
+    text = (request.form.get("text", "") or "")
+
     try:
+        if handle_ussd is None:
+            app.logger.error('[USSD] handle_ussd import failed (ussd.py not loaded)')
+            return ('END System error. Please try again.', 200)
+
         rv = handle_ussd(session_id=session_id, phone_number=phone_number, text=text)
 
         if rv is None:
+            app.logger.exception("[USSD][EXC] handle_ussd returned None")
             return ("END System error. Please try again.", 200)
 
-        # Allow either:
-        #  - string body
-        #  - (body, status_code)
-        #  - ((body, status_code), status_code)  (accidental nesting)
+        # Flatten accidental nested tuples: ((body, code), code)
         if isinstance(rv, tuple) and len(rv) == 2 and isinstance(rv[0], tuple) and len(rv[0]) == 2:
             rv = rv[0]
 
-        if isinstance(rv, tuple) and len(rv) == 2:
-            body, code = rv
-            return (str(body), int(code))
-
-        # default: assume body-only
-        return (str(rv), 200)
-
-    except Exception as e:
-        # Never crash the USSD gateway: return a safe END message
+        return rv
+    except Exception:
+        app.logger.exception("[USSD][EXC] System error in /ussd")
         return ("END System error. Please try again.", 200)
 
-# -----------------------------
-# Web UI tester & health check
-# -----------------------------
 @app.route("/", methods=["GET"])
 def index():
     # Web UI tester
@@ -431,8 +575,9 @@ def health2():
 
 
 # --- WEB TESTER PANELS (debug cockpit) ---
-import sqlite3
 from flask import jsonify
+import traceback
+from datetime import datetime
 
 def _db_path():
     # keep aligned with ussd.py db

@@ -149,3 +149,43 @@ input:focus{border-color:rgba(46,107,255,.6)}
 }
 
 .muted{color:var(--muted);font-size:13px;margin-top:6px}
+
+
+/* OUTIXs ticker */
+.ticker{
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-top: 1px solid #e5e7eb;
+  background: rgba(255,255,255,0.95);
+  backdrop-filter: blur(6px);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  z-index: 9999;
+}
+.tickerLabel{
+  font-weight: 700;
+  font-size: 12px;
+  color: #111827;
+  white-space: nowrap;
+}
+.tickerTrack{
+  overflow: hidden;
+  flex: 1;
+}
+.tickerText{
+  display: inline-block;
+  white-space: nowrap;
+  animation: tickerMove 35s linear infinite;
+  font-size: 12px;
+  color: #374151;
+}
+@keyframes tickerMove{
+  0% { transform: translateX(100%); }
+  100% { transform: translateX(-100%); }
+}
+
+/* give room for fixed ticker */
+body{ padding-bottom: 56px; }

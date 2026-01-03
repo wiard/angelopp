@@ -1,5 +1,15 @@
 "use strict";
 
+function roleLabel(who){
+  try{
+    const r = who?.role || {};
+    const p = r.primary || "customer";
+    const sub = r.sub || "";
+    return sub ? (p + "/" + sub) : p;
+  }catch(e){ return "customer"; }
+}
+
+
 const $ = (id) => document.getElementById(id);
 
 function nowId() { return "WEB" + Date.now(); }
@@ -12,6 +22,110 @@ function escapeHtml(s) {
 function setText(t) { $("text").value = t ?? ""; }
 function appendText(s) { $("text").value = ($("text").value || "") + (s || ""); }
 function setPhone(p) { if (p) $("phoneNumber").value = p; }
+
+
+async function setRole(primary, sub="") {
+  const phone = $("phoneNumber").value.trim();
+  const params = new URLSearchParams();
+  params.set("phone", phone);
+  params.set("primary", primary);
+  params.set("sub", sub || "");
+  const r = await fetch(`/api/set_role?${params.toString()}`, { method:"POST" });
+  const j = await r.json();
+  $("dbg").textContent = JSON.stringify(j, null, 2);
+  await refreshWhoami();
+  try { await loadPanels(); } catch(e) {}
+}
+
+function btn(label, onclick) {
+  const b = document.createElement("button");
+  b.className = "btn";
+  b.textContent = label;
+  b.onclick = onclick;
+  return b;
+}
+
+function renderRoleTree(w) {
+  const el = $("roleTree");
+  if (!el) return;
+  el.innerHTML = "";
+
+  const role = w?.role || {};
+  const active = `${role.primary || "?"}${role.sub ? ":"+role.sub : ""}`;
+
+  const wrap = document.createElement("div");
+  wrap.className = "panels";
+
+  const h = document.createElement("div");
+  h.className = "pill";
+  h.textContent = "Active: " + active;
+  el.appendChild(h);
+
+  // Build hierarchy from available_roles
+  const groups = {};
+  (w?.available_roles || []).forEach(r => {
+    const k = r.primary || "other";
+    groups[k] = groups[k] || [];
+    groups[k].push(r.sub || "");
+  });
+
+  Object.keys(groups).forEach(primary => {
+    const card = document.createElement("div");
+    card.className = "panel";
+
+    const title = document.createElement("div");
+    title.className = "pTitle";
+    title.textContent = primary.toUpperCase();
+    card.appendChild(title);
+
+    const subs = groups[primary];
+    if (subs.length === 1 && subs[0] === "") {
+      card.appendChild(btn(primary, () => setRole(primary, "")));
+    } else {
+      subs.forEach(sub => {
+        const label = sub ? `${primary}:${sub}` : primary;
+        card.appendChild(btn(label, () => setRole(primary, sub)));
+      });
+    }
+
+    // Convenience: set USSD text shortcuts from menus (if present)
+    const menus = w?.menus || {};
+    const row = document.createElement("div");
+    row.className = "row";
+    if (primary === "customer") {
+      row.appendChild(btn("Home", () => setText(menus.customer_home ?? "")));
+      row.appendChild(btn("Nearest riders", () => setText(menus.nearest_riders ?? "1")));
+      row.appendChild(btn("Shops", () => setText(menus.shops ?? "2")));
+      row.appendChild(btn("Listen", () => setText(menus.listen ?? "6")));
+      row.appendChild(btn("My channel", () => setText(menus.my_channel ?? "7")));
+    }
+    if (primary === "provider") {
+      row.appendChild(btn("Home", () => setText(menus.provider_home ?? "4")));
+      row.appendChild(btn("Inbox", () => setText(menus.provider_inbox ?? "4*2")));
+    }
+    if (primary === "traveler") {
+      row.appendChild(btn("Travel", () => setText(menus.travel ?? "8")));
+    }
+    card.appendChild(row);
+
+    wrap.appendChild(card);
+  });
+
+  el.appendChild(wrap);
+}
+
+async function refreshWhoami() {
+  const phone = $("phoneNumber").value.trim();
+  const r = await fetch(`/api/whoami?phone=${encodeURIComponent(phone)}`);
+  const j = await r.json();
+
+  $("serverOk").textContent = "ok";
+  $("role").textContent = (j.role?.primary || "?") + (j.role?.sub ? ":"+j.role.sub : "");
+  $("village").textContent = (j.identity?.village || "?");
+
+  renderRoleTree(j);
+  return j;
+}
 
 async function postUssd() {
   const base = $("baseUrl").value.trim() || "/ussd";
@@ -272,3 +386,31 @@ function bind() {
   await whoami();
   await loadPanels();
 })();
+
+
+async function loadOutixsTicker() {
+  const el = document.getElementById("outixsTickerText");
+  if (!el) return;
+
+  try {
+    const r = await fetch(`/api/outixs_ticker?limit=30`);
+    const j = await r.json();
+    if (!j || !j.events) { el.textContent = "no ticker data"; return; }
+
+    const parts = j.events.map(e => {
+      const when = (e.created_at || "").replace("2026-","").replace(":00","");
+      const ref = `${e.ref_type}#${e.ref_id}`;
+      const amt = (e.amount ?? 0);
+      const who = e.phone ? ` ${e.phone}` : "";
+      return `[${when}] ${e.event_type} ${ref}${who} (+${amt})`;
+    });
+
+    el.textContent = parts.length ? parts.join("  •  ") : "no OUTIXs events yet";
+  } catch (err) {
+    el.textContent = "ticker error (check /api/outixs_ticker)";
+  }
+}
+
+// poll ticker
+setInterval(loadOutixsTicker, 2500);
+window.addEventListener("load", () => { try { loadOutixsTicker(); } catch(e){} });
