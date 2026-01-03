@@ -15,6 +15,16 @@ PUBLIC_DIR = APP_DIR / "public"
 
 app = Flask(__name__)
 
+from flask import send_from_directory
+
+@app.route("/tester", methods=["GET"])
+def tester():
+    return send_from_directory("static", "tester.html")
+
+@app.route("/health", methods=["GET"])
+def health():
+    return ("ok", 200)
+
 DB_PATH = os.environ.get("ANGELOPP_DB", "/opt/angelopp/data/bumala.db")
 ANON_SALT = os.environ.get("ANGELOPP_ANON_SALT", "angelopp-public-v1")
 
@@ -112,10 +122,24 @@ def ussd():
         # Never crash the USSD gateway: return a safe END message
         return ("END System error. Please try again.", 200)
 
+# -----------------------------
+# Web UI tester & health check
+# -----------------------------
+@app.route("/", methods=["GET"])
+def index():
+    # Web UI tester
+    return send_from_directory("static", "tester.html")
+
+@app.route("/health2", methods=["GET"], endpoint="health2")
+def health2():
+    return ("ok", 200)
+
 if __name__ == "__main__":
     # Dev server. In production, run behind nginx with a real WSGI server.
     port = int(os.environ.get("PORT", "5002"))
     # Ensure DB path is consistent
     os.environ.setdefault("ANGELOPP_DB", "/opt/angelopp/data/bumala.db")
     app.run(host="127.0.0.1", port=port, debug=False)
+
+
 

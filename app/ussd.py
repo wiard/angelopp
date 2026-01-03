@@ -2298,6 +2298,9 @@ def handle_ussd(session_id: str, phone_number: str, text: str):
 
     
 
+    parts = raw.split("*") if raw else []
+    last = (parts[-1] if parts else "").strip()
+
 ### EARLY_CHOOSE_SERVICE_INTERCEPT_V1 ###
     # Hard-safe intercept for option 1 (Choose service) BEFORE any deeper logic.
     # This prevents crashes if later branches assume state that isn't set yet.
@@ -2339,6 +2342,7 @@ def handle_ussd(session_id: str, phone_number: str, text: str):
     # Here we accept: 1*2*<n> to OFFER the latest 'new' delivery request to that rider.
     if role == "customer" and raw.startswith("1*2*"):
         parts = raw.split("*")
+        last = (parts[-1] if parts else "").strip()
         # 1*2*<n>
         if len(parts) >= 3:
             sel = parts[2].strip()
