@@ -1,161 +1,273 @@
-function nowTs(){
-  const d = new Date();
-  return d.toLocaleTimeString();
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+
+function nowId() { return "WEB" + Date.now(); }
+function escapeHtml(s) {
+  return (s ?? "").toString()
+    .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;").replaceAll("'","&#039;");
 }
 
-function newSessionId(){
-  return "WEB" + Date.now();
-}
+function setText(t) { $("text").value = t ?? ""; }
+function appendText(s) { $("text").value = ($("text").value || "") + (s || ""); }
+function setPhone(p) { if (p) $("phoneNumber").value = p; }
 
-async function postUSSD(sessionId, phoneNumber, text){
+async function postUssd() {
+  const base = $("baseUrl").value.trim() || "/ussd";
+  const sid = $("sessionId").value.trim() || nowId();
+  const phone = $("phoneNumber").value.trim();
+  const text = $("text").value;
+
+  $("sessionId").value = sid;
+
   const body = new URLSearchParams();
-  body.set("sessionId", sessionId);
-  body.set("phoneNumber", phoneNumber);
+  body.set("sessionId", sid);
+  body.set("phoneNumber", phone);
   body.set("text", text);
 
-  const res = await fetch("/ussd", {
-    method: "POST",
-    headers: {"Content-Type": "application/x-www-form-urlencoded"},
-    body: body.toString()
-  });
-
-  const t = await res.text();
-  return {status: res.status, text: t};
+  const r = await fetch(base, { method:"POST", body });
+  const resp = await r.text();
+  $("resp").textContent = resp;
+  renderClickableOptions(resp);
+  return resp;
 }
 
-function setStatus(el, msg, cls){
-  el.className = "status " + (cls || "");
-  el.textContent = msg;
-}
+function renderClickableOptions(respText) {
+  const clicks = $("clicks");
+  clicks.innerHTML = "";
+  const lines = (respText || "").split("\n").map(l => l.trim()).filter(Boolean);
 
-function addHistory(historyEl, req, resp){
-  const wrap = document.createElement("div");
-  wrap.className = "item";
+  // Parse menu lines like: "1. Foo" or "2) Foo" or "0. Back"
+  const opts = [];
+  for (const l of lines) {
+    let m = l.match(/^(\d+)\s*[\.\)]\s*(.+)$/);
+    if (m) opts.push({ n: m[1], label: m[2] });
+  }
 
-  const hdr = document.createElement("div");
-  hdr.className = "hdr";
-  hdr.innerHTML = `<span>${nowTs()}</span><span>HTTP ${resp.status}</span>`;
+  if (!opts.length) return;
 
-  const pre = document.createElement("pre");
-  pre.textContent =
-`REQ
-sessionId=${req.sessionId}
-phoneNumber=${req.phoneNumber}
-text=${req.text}
-
-RESP
-${resp.text}`.trim();
-
-  wrap.appendChild(hdr);
-  wrap.appendChild(pre);
-
-  historyEl.prepend(wrap);
-}
-
-document.addEventListener("DOMContentLoaded", () => {
-  const elSid = document.getElementById("sessionId");
-  const elPhone = document.getElementById("phoneNumber");
-  const elText = document.getElementById("text");
-  const elResp = document.getElementById("response");
-  const elHist = document.getElementById("history");
-  const elStatus = document.getElementById("status");
-
-  const btnSend = document.getElementById("btnSend");
-  const btnNewSid = document.getElementById("btnNewSid");
-  const btnClear = document.getElementById("btnClear");
-  const btnRoot = document.getElementById("btnRoot");
-  const btnBack0 = document.getElementById("btnBack0");
-  const btnCopy = document.getElementById("btnCopy");
-
-  elSid.value = newSessionId();
-
-  async function send(textOverride){
-    const req = {
-      sessionId: (elSid.value || "").trim(),
-      phoneNumber: (elPhone.value || "").trim(),
-      text: (typeof textOverride === "string") ? textOverride : (elText.value || "")
+  for (const o of opts) {
+    const b = document.createElement("button");
+    b.className = "btn small";
+    b.textContent = `${o.n} → ${o.label}`;
+    b.onclick = () => {
+      const cur = $("text").value || "";
+      if (!cur) setText(o.n);
+      else appendText("*" + o.n);
+      postUssd();
     };
+    clicks.appendChild(b);
+  }
+}
 
-    if(!req.sessionId) req.sessionId = newSessionId();
-    elSid.value = req.sessionId;
+async function whoami() {
+  const phone = $("phoneNumber").value.trim();
+  const r = await fetch(`/api/whoami?phone=${encodeURIComponent(phone)}`);
+  const j = await r.json();
+  $("dbg").textContent = JSON.stringify(j, null, 2);
+  $("role").textContent = j.role ?? "?";
+  $("village").textContent = j.village ?? "?";
+  return j;
+}
 
-    setStatus(elStatus, "Sending…", "warn");
-    btnSend.disabled = true;
+async function health() {
+  const r = await fetch("/health");
+  const t = await r.text();
+  $("dbg").textContent = t;
+  $("serverOk").textContent = t.trim() === "OK" || t.trim() === "ok" ? "ok" : t.trim();
+}
 
-    try{
-      const resp = await postUSSD(req.sessionId, req.phoneNumber, req.text);
-      elResp.textContent = resp.text || "";
-      addHistory(elHist, req, resp);
+async function seedDemo() {
+  const phone = $("phoneNumber").value.trim();
+  const village = $("village").textContent?.trim() || "Church";
+  const r = await fetch(`/api/seed_demo?phone=${encodeURIComponent(phone)}&village=${encodeURIComponent(village)}`, { method:"POST" });
+  const j = await r.json();
+  $("dbg").textContent = JSON.stringify(j, null, 2);
+  await loadPanels();
+}
 
-      // Heuristic: highlight END/CON
-      const head = (resp.text || "").trim().slice(0, 4).toUpperCase();
-      if(head === "END ") setStatus(elStatus, "END response", "ok");
-      else if(head === "CON ") setStatus(elStatus, "CON response", "ok");
-      else setStatus(elStatus, "Response received", "ok");
+async function clearDemo() {
+  const phone = $("phoneNumber").value.trim();
+  const village = $("village").textContent?.trim() || "Church";
+  const r = await fetch(`/api/clear_demo?phone=${encodeURIComponent(phone)}&village=${encodeURIComponent(village)}`, { method:"POST" });
+  const j = await r.json();
+  $("dbg").textContent = JSON.stringify(j, null, 2);
+  await loadPanels();
+}
 
-    } catch(e){
-      elResp.textContent = String(e);
-      setStatus(elStatus, "Error: " + String(e), "bad");
-    } finally {
-      btnSend.disabled = false;
-      elText.focus();
+function renderPanels(p) {
+  const root = $("panels");
+  root.innerHTML = "";
+
+  const mk = (title) => {
+    const d = document.createElement("div");
+    d.className = "panel";
+    const h = document.createElement("div");
+    h.className = "panelTitle";
+    h.textContent = title;
+    const c = document.createElement("div");
+    c.className = "panelBody";
+    d.appendChild(h); d.appendChild(c);
+    root.appendChild(d);
+    return c;
+  };
+
+  // Riders: use USSD flow "1" and click 1/2/3 etc
+  const riders = mk("Nearest riders (USSD: 1)");
+  const ridersHint = document.createElement("div");
+  ridersHint.className = "muted";
+  ridersHint.innerHTML = `Click: set <code>text=1</code> then choose 1/2/3.`;
+  riders.appendChild(ridersHint);
+  const bR = document.createElement("button");
+  bR.className = "btn small";
+  bR.textContent = "Go → 1 (Nearest riders)";
+  bR.onclick = () => { setText("1"); postUssd(); };
+  riders.appendChild(bR);
+
+  // Deliveries
+  const del = mk("Deliveries (Provider inbox: 4*2)");
+  const delBtns = document.createElement("div");
+  delBtns.className = "row";
+  const bIn = document.createElement("button");
+  bIn.className = "btn small";
+  bIn.textContent = "Open inbox as Provider (+254700000002)";
+  bIn.onclick = () => { setPhone("+254700000002"); setText("4*2"); postUssd(); };
+  delBtns.appendChild(bIn);
+  del.appendChild(delBtns);
+
+  const latest = p?.deliveries?.latest || [];
+  const open = p?.deliveries?.open || [];
+  const list = [...open, ...latest].slice(0, 10);
+
+  if (!list.length) {
+    const e = document.createElement("div");
+    e.className = "muted";
+    e.textContent = "No deliveries in panels.";
+    del.appendChild(e);
+  } else {
+    for (const d of list) {
+      const row = document.createElement("div");
+      row.className = "item";
+      const id = d.id ?? d[0];
+      const pickup = d.pickup_landmark ?? d[4] ?? "Unknown";
+      const drop = d.dropoff_landmark ?? d[6] ?? "";
+      const status = d.status ?? d[8] ?? "";
+      const assigned = d.assigned_rider_phone ?? d[9] ?? "";
+
+      row.innerHTML = `<b>#${escapeHtml(id)}</b> ${escapeHtml(pickup)} → ${escapeHtml(drop)} <span class="tag">${escapeHtml(status)}</span> ${assigned ? `<span class="tag">assigned: ${escapeHtml(assigned)}</span>` : ""}`;
+      const actions = document.createElement("div");
+      actions.className = "row";
+
+      // provider action path: 4*2*<n>*X is index-based in inbox; we don't know index here.
+      // But we CAN jump to inbox and user clicks item number.
+      const go = document.createElement("button");
+      go.className = "btn small";
+      go.textContent = "Go inbox";
+      go.onclick = () => { setPhone("+254700000002"); setText("4*2"); postUssd(); };
+      actions.appendChild(go);
+
+      const note = document.createElement("div");
+      note.className = "muted";
+      note.textContent = "Then choose item number (1/2/3...) to view details, then Accept/Picked up/Delivered.";
+      row.appendChild(actions);
+      row.appendChild(note);
+      del.appendChild(row);
     }
   }
 
-  btnSend.addEventListener("click", () => send());
-  elText.addEventListener("keydown", (e) => {
-    if(e.key === "Enter") send();
-  });
+  // Shops: USSD path currently "2"
+  const shops = mk("Shops (USSD: 2)");
+  const bS = document.createElement("button");
+  bS.className = "btn small";
+  bS.textContent = "Go → 2 (Local Businesses)";
+  bS.onclick = () => { setText("2"); postUssd(); };
+  shops.appendChild(bS);
 
-  btnNewSid.addEventListener("click", () => {
-    elSid.value = newSessionId();
-    setStatus(elStatus, "New sessionId set", "");
-  });
+  const biz = p?.businesses || [];
+  if (biz.length) {
+    const ul = document.createElement("div");
+    ul.className = "muted";
+    ul.textContent = `Known businesses in DB (panels): ${biz.length}`;
+    shops.appendChild(ul);
+  }
 
-  btnClear.addEventListener("click", () => {
-    elHist.innerHTML = "";
-    elResp.textContent = "—";
-    setStatus(elStatus, "Cleared", "");
-  });
+  // Channels: show list + USSD path "6" and "7"
+  const ch = mk("Channels (USSD: 6 listen / 7 my channel)");
+  const row = document.createElement("div");
+  row.className = "row";
+  const b6 = document.createElement("button");
+  b6.className = "btn small";
+  b6.textContent = "Go → 6 (Listen)";
+  b6.onclick = () => { setText("6"); postUssd(); };
+  const b7 = document.createElement("button");
+  b7.className = "btn small";
+  b7.textContent = "Go → 7 (My channel)";
+  b7.onclick = () => { setText("7"); postUssd(); };
+  row.appendChild(b6); row.appendChild(b7);
+  ch.appendChild(row);
 
-  btnRoot.addEventListener("click", () => {
-    elText.value = "";
-    send("");
-  });
-
-  btnBack0.addEventListener("click", () => {
-    const t = (elText.value || "").trim();
-    if(!t) { elText.value = "0"; return; }
-    elText.value = t.endsWith("*0") ? t : (t + "*0");
-    send(elText.value);
-  });
-
-  btnCopy.addEventListener("click", async () => {
-    try{
-      await navigator.clipboard.writeText(elResp.textContent || "");
-      setStatus(elStatus, "Copied response", "ok");
-    } catch(e){
-      setStatus(elStatus, "Copy failed", "bad");
+  const chans = p?.channels || [];
+  if (chans.length) {
+    for (const c of chans.slice(0, 10)) {
+      const it = document.createElement("div");
+      it.className = "item";
+      it.innerHTML = `<b>${escapeHtml(c.name ?? "Channel")}</b> <span class="tag">#${escapeHtml(c.id ?? "")}</span> <span class="muted">${escapeHtml(c.created_at ?? "")}</span>`;
+      ch.appendChild(it);
     }
-  });
+  } else {
+    const e = document.createElement("div");
+    e.className = "muted";
+    e.textContent = "No channels found in panels.";
+    ch.appendChild(e);
+  }
+}
 
-  // Quick chips
-  document.querySelectorAll(".chip").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const txt = btn.getAttribute("data-text") || "";
-      elText.value = txt;
-      send(txt);
+async function loadPanels() {
+  const phone = $("phoneNumber").value.trim();
+  const village = $("village").textContent?.trim() || "Church";
+  const r = await fetch(`/api/panels?phone=${encodeURIComponent(phone)}&village=${encodeURIComponent(village)}`);
+  const j = await r.json();
+  $("panelsJson").textContent = JSON.stringify(j, null, 2);
+  renderPanels(j);
+  return j;
+}
+
+function bind() {
+  $("btnStart").onclick = async () => { setText(""); await postUssd(); };
+  $("btnSend").onclick = postUssd;
+  $("btnReset").onclick = () => { $("sessionId").value = nowId(); $("dbg").textContent=""; $("resp").textContent=""; $("clicks").innerHTML=""; };
+  $("btnSeed").onclick = seedDemo;
+  $("btnClear").onclick = clearDemo;
+  $("btnPanels").onclick = loadPanels;
+
+  $("btnWhoami").onclick = whoami;
+  $("btnHealth").onclick = health;
+
+  // chips (settext + optional phone)
+  document.querySelectorAll("[data-settext]").forEach((b) => {
+    b.addEventListener("click", () => {
+      const t = b.getAttribute("data-settext");
+      const p = b.getAttribute("data-phone");
+      if (p) setPhone(p);
+      setText(t);
+      postUssd();
     });
   });
-});
 
-
-// START button: send empty text to show the root menu without "Invalid option"
-const startBtn = document.getElementById("startBtn");
-if (startBtn) {
-  startBtn.addEventListener("click", async () => {
-    document.getElementById("text").value = "";
-    // keep sessionId + phoneNumber as-is, but send empty text
-    await sendRequest();
+  // small appenders
+  document.querySelectorAll("[data-append]").forEach((b) => {
+    b.addEventListener("click", () => {
+      appendText(b.getAttribute("data-append"));
+      postUssd();
+    });
   });
 }
+
+(async function init(){
+  $("sessionId").value = nowId();
+  bind();
+  await health();
+  await whoami();
+  await loadPanels();
+})();

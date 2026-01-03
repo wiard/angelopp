@@ -3,56 +3,92 @@
 <head>
   <meta charset="utf-8" />
   <title>Angelopp USSD Tester</title>
-  <style>
-    body { font-family: Arial, sans-serif; max-width: 780px; margin: 40px auto; }
-    input, textarea { width: 100%; padding: 10px; margin: 8px 0; }
-    button { padding: 10px 16px; cursor: pointer; }
-    pre { background:#f5f5f5; padding:12px; white-space:pre-wrap; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/tester.css" />
 </head>
 <body>
-  <h1>Angelopp USSD Tester</h1>
+  <div class="wrap">
+    <header class="top">
+      <div>
+        <div class="h1">Angelopp USSD Tester</div>
+        <div class="sub">Test all flows in a web cockpit</div>
+      </div>
+      <div class="status">
+        <div>server: <span id="serverOk">?</span></div>
+        <div>role: <span id="role">?</span></div>
+        <div>village: <span id="village">?</span></div>
+      </div>
+    </header>
 
-  <label>Base URL</label>
-  <input id="base" value="/ussd" />
+    <section class="card">
+      <h2>Session</h2>
+      <div class="grid">
+        <label>Base URL <input id="baseUrl" value="/ussd" /></label>
+        <label>sessionId <input id="sessionId" placeholder="WEB..." /></label>
+        <label>phoneNumber <input id="phoneNumber" value="+23276000001" /></label>
+        <label>text <input id="text" placeholder="e.g. 1*2*1" /></label>
+      </div>
 
-  <label>sessionId</label>
-  <input id="sid" />
+      <div class="row">
+        <button id="btnStart" class="btn">Start (text=)</button>
+        <button id="btnSend" class="btn primary">Send</button>
+        <button id="btnReset" class="btn">Reset session</button>
+        <button id="btnSeed" class="btn">Seed demo data</button>
+        <button id="btnClear" class="btn">Clear demo data</button>
+        <button id="btnPanels" class="btn">Load panels</button>
+      </div>
 
-  <label>phoneNumber</label>
-  <input id="phone" value="+23276000001" />
+      <div class="row">
+        <button class="btn chip" data-settext="">Customer home</button>
+        <button class="btn chip" data-settext="" data-phone="+254700000002">Provider home</button>
+        <button class="btn chip" data-settext="1">Nearest riders</button>
+        <button class="btn chip" data-settext="2">Shops</button>
+        <button class="btn chip" data-settext="6">Listen (channels)</button>
+        <button class="btn chip" data-settext="7">My channel</button>
+        <button class="btn chip" data-settext="4*2" data-phone="+254700000002">Provider: delivery inbox</button>
+      </div>
+    </section>
 
-  <label>text</label>
-  <input id="text" value="" />
+    <section class="card">
+      <h2>Response</h2>
+      <pre id="resp" class="pre"></pre>
+      <div class="hint">
+        Tip: this UI keeps one text string like Africa’s Talking: <code>1*2*1</code>. Clicking options appends selections automatically.
+      </div>
+      <div class="row">
+        <button class="btn small" data-append="*0">0 (Back)</button>
+        <button class="btn small" data-append="*1">Accept (…*1)</button>
+        <button class="btn small" data-append="*2">Picked up (…*2)</button>
+        <button class="btn small" data-append="*3">Delivered (…*3)</button>
+      </div>
+      <div id="clicks" class="clicks"></div>
+    </section>
 
-  <button id="startBtn" type="button">Start (text=)</button>
-<button onclick="send()">Send</button>
+    <section class="card">
+      <h2>Panels</h2>
+      <div class="row">
+        <div class="pill">Nearest riders (demo)</div>
+        <div class="pill">Deliveries</div>
+        <div class="pill">Shops</div>
+        <div class="pill">Channels</div>
+      </div>
+      <div id="panels" class="panels"></div>
+      <details>
+        <summary>Raw JSON</summary>
+        <pre id="panelsJson" class="pre"></pre>
+      </details>
+    </section>
 
-  <h3>Response</h3>
-  <pre id="out"></pre>
+    <section class="card">
+      <h2>Debug</h2>
+      <div class="row">
+        <button id="btnWhoami" class="btn">Who am I?</button>
+        <button id="btnHealth" class="btn">/health</button>
+      </div>
+      <pre id="dbg" class="pre"></pre>
+    </section>
+  </div>
 
-<script>
-  function randSid(){
-    return "WEB" + Date.now();
-  }
-  document.getElementById("sid").value = randSid();
-
-  async function send(){
-    const base = document.getElementById("base").value || "/ussd";
-    const sid = document.getElementById("sid").value || randSid();
-    const phone = document.getElementById("phone").value;
-    const text = document.getElementById("text").value;
-
-    const body = new URLSearchParams();
-    body.set("sessionId", sid);
-    body.set("phoneNumber", phone);
-    body.set("text", text);
-
-    const r = await fetch(base, { method:"POST", body });
-    const t = await r.text();
-    document.getElementById("out").textContent = t;
-    document.getElementById("sid").value = sid;
-  }
-</script>
+  <script src="/static/tester.js"></script>
 </body>
 </html>
